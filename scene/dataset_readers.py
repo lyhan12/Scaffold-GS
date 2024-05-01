@@ -38,7 +38,6 @@ class CameraInfo(NamedTuple):
     T: np.array
     FovY: np.array
     FovX: np.array
-    image: np.array
     image_path: str
     image_name: str
     width: int
@@ -112,7 +111,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
         # print(f'image: {image.size}')
 
-        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+        cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX,
                               image_path=image_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
@@ -126,7 +125,13 @@ def fetchPly(path):
         colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
     except:
         colors = np.random.rand(positions.shape[0], positions.shape[1])
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+
+
+    try:
+        normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    except:
+        normals = np.random.rand(positions.shape[0], positions.shape[1])
+
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
@@ -255,7 +260,6 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
 
             image_path = os.path.join(path, cam_name)
             image_name = Path(cam_name).stem
-            image = Image.open(image_path)
 
             if undistorted:
                 mtx = np.array(
@@ -286,7 +290,7 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
                 FovY = focal2fov(frame["fl_y"], image.size[1])
                 FovX = focal2fov(frame["fl_x"], image.size[0])
 
-            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX,
                             image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1]))
             
             if is_debug and idx > 50:
@@ -329,7 +333,60 @@ def readNerfSyntheticInfo(path, white_background, eval, extension=".png", ply_pa
                            ply_path=ply_path)
     return scene_info
 
+
+def readMegaNeRFInfo(path, images, eval, ds):
+    try:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    except:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
+    reading_dir = "images" if ds == 1 else f"images_{ds}"
+    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+    cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
+
+    test_image_list = ["000000.jpg", "000194.jpg", "000388.jpg", "000582.jpg", "000776.jpg", "000970.jpg", "001164.jpg", "001358.jpg", "001552.jpg", "001746.jpg",
+                    "000097.jpg", "000291.jpg", "000485.jpg", "000679.jpg", "000873.jpg", "001067.jpg", "001261.jpg", "001455.jpg", "001649.jpg", "001843.jpg"]
+    test_image_list = [name.split(".")[0] for name in test_image_list]
+
+    if eval:
+        train_cam_infos = [c for c in cam_infos if c.image_name not in test_image_list]
+        test_cam_infos = [c for c in cam_infos if c.image_name in test_image_list]
+    else:
+        train_cam_infos = cam_infos
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    bin_path = os.path.join(path, "sparse/0/points3D.bin")
+    txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    if not os.path.exists(ply_path):
+        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        try:
+            xyz, rgb, _ = read_points3D_binary(bin_path)
+        except:
+            xyz, rgb, _ = read_points3D_text(txt_path)
+        storePly(ply_path, xyz, rgb)
+    # try:
+    print(f'start fetching data from ply file')
+    pcd = fetchPly(ply_path)
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path)
+    return scene_info
+
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender": readNerfSyntheticInfo,
+    "MegaNeRF": readMegaNeRFInfo,
 }

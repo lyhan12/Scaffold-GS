@@ -150,30 +150,24 @@ class GaussianModel:
         return (
             self._anchor,
             self._offset,
-            self._local,
             self._scaling,
             self._rotation,
             self._opacity,
             self.max_radii2D,
-            self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._anchor, 
+        (self._anchor, 
         self._offset,
-        self._local,
         self._scaling, 
         self._rotation, 
         self._opacity,
         self.max_radii2D, 
-        denom,
         opt_dict, 
         self.spatial_lr_scale) = model_args
         self.training_setup(training_args)
-        self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
     def set_appearance(self, num_cameras):
@@ -415,7 +409,13 @@ class GaussianModel:
 
         elements = np.empty(anchor.shape[0], dtype=dtype_full)
         attributes = np.concatenate((anchor, normals, offset, anchor_feat, opacities, scale, rotation), axis=1)
-        elements[:] = list(map(tuple, attributes))
+
+        max_chunk_size = 1_000_000
+        for i in range(0, anchor.shape[0], max_chunk_size):
+            if i+max_chunk_size < anchor.shape[0]:
+                elements[i:i+max_chunk_size] = list(map(tuple, attributes[i:i+max_chunk_size]))
+            else:
+                elements[i:] = list(map(tuple, attributes[i:]))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
 

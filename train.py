@@ -84,14 +84,20 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.feat_dim, dataset.n_offsets, dataset.voxel_size, dataset.update_depth, dataset.update_init_factor, dataset.update_hierachy_factor, dataset.use_feat_bank, 
                               dataset.appearance_dim, dataset.ratio, dataset.add_opacity_dist, dataset.add_cov_dist, dataset.add_color_dist)
-    scene = Scene(dataset, gaussians, ply_path=ply_path, shuffle=False)
-    gaussians.training_setup(opt)
+
     if checkpoint:
-        (model_params, first_iter) = torch.load(checkpoint)
-        gaussians.restore(model_params, opt)
+        _, first_iter = torch.load(checkpoint)
+        scene = Scene(dataset, gaussians, load_iteration=first_iter, ply_path=ply_path, shuffle=False)
+        gaussians.train()
+    else:
+        scene = Scene(dataset, gaussians, ply_path=ply_path, shuffle=False)
+
+    gaussians.training_setup(opt)
+
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
+
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
@@ -466,10 +472,14 @@ if __name__ == "__main__":
     parser.add_argument('--use_wandb', action='store_true', default=False)
     # parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
+    default_iterations = [10, 5000] + list(range(10000, 200000, 10000))
+    debug_iterations = []
+    iterations = default_iterations + debug_iterations
+
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=iterations)
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=iterations)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=iterations)
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--gpu", type=str, default = '-1')
     args = parser.parse_args(sys.argv[1:])
