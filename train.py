@@ -472,7 +472,7 @@ if __name__ == "__main__":
     parser.add_argument('--use_wandb', action='store_true', default=False)
     # parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
-    default_iterations = [10, 5000] + list(range(10000, 200000, 10000))
+    default_iterations = [10] + [500] + [1000] + [1500] + [2000] + list(range(10000, 60000, 10000))
     debug_iterations = []
     iterations = default_iterations + debug_iterations
 

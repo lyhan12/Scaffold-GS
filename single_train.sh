@@ -1,6 +1,6 @@
-scene='mipnerf360/bicycle'
-exp_name='baseline'
-voxel_size=0.001
+scene="MegaNeRF/building-pixsfm"
+exp_name="init_mesh"
+voxel_size=0.01
 update_init_factor=16
 appearance_dim=0
 ratio=1
