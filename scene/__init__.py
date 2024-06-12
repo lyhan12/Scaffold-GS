@@ -78,7 +78,7 @@ class Scene:
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
 
-        # print(f'self.cameras_extent: {self.cameras_extent}')
+        print(f'self.cameras_extent: {self.cameras_extent}')
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")
@@ -95,7 +95,7 @@ class Scene:
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter)))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            self.gaussians.create_from_pcd(scene_info.point_cloud)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))

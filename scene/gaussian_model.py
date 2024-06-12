@@ -226,8 +226,7 @@ class GaussianModel:
         
         return data
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
-        self.spatial_lr_scale = spatial_lr_scale
+    def create_from_pcd(self, pcd : BasicPointCloud):
         points = pcd.points[::self.ratio]
 
         if self.voxel_size <= 0:
@@ -240,6 +239,9 @@ class GaussianModel:
             torch.cuda.empty_cache()
 
         print(f'Initial voxel_size: {self.voxel_size}')
+        print(f"Spatial Lr Scale: {self.spatial_lr_scale}")
+        self.spatial_lr_scale  = 7.009
+
         
         
         points = self.voxelize_sample(points, voxel_size=self.voxel_size)
@@ -279,8 +281,8 @@ class GaussianModel:
         
         if self.use_feat_bank:
             l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
+                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
+                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
                 {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
                 {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},

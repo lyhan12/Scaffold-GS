@@ -146,6 +146,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
+        projmatrix_raw=viewpoint_camera.projection_matrix,
         sh_degree=1,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
@@ -153,9 +154,10 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
+
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii = rasterizer(
+    rendered_image, radii, depth, opacity, n_touched  = rasterizer(
         means3D = xyz,
         means2D = screenspace_points,
         shs = None,
@@ -163,7 +165,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         opacities = opacity,
         scales = scaling,
         rotations = rot,
-        cov3D_precomp = None)
+        cov3D_precomp = None,
+        theta = viewpoint_camera.cam_rot_delta,
+        rho = viewpoint_camera.cam_trans_delta)
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     if is_training:
@@ -174,12 +178,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 "selection_mask": mask,
                 "neural_opacity": neural_opacity,
                 "scaling": scaling,
+                "depth": depth,
+                "opacity": opacity,
                 }
     else:
         return {"render": rendered_image,
                 "viewspace_points": screenspace_points,
                 "visibility_filter" : radii > 0,
                 "radii": radii,
+                "depth": depth,
+                "opacity": opacity
                 }
 
 
@@ -209,6 +217,7 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
+        projmatrix_raw=viewpoint_camera.projection_matrix,
         sh_degree=1,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,

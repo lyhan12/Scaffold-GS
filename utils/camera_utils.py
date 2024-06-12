@@ -11,7 +11,7 @@
 
 from scene.cameras import Camera
 import numpy as np
-from utils.general_utils import PILtoTorch
+from utils.general_utils import PILtoTorch, NP_resize
 from utils.graphics_utils import fov2focal
 
 WARNED = False
@@ -30,9 +30,9 @@ def loadCam(args, id, cam_info, resolution_scale):
     # if resized_image_rgb.shape[1] == 4:
     #     loaded_mask = resized_image_rgb[3:4, ...]
 
-    return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, resolution=(cam_info.width, cam_info.height),
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, image_path=cam_info.image_path,
-                  image_name=cam_info.image_name, uid=id, data_device=args.data_device)
+    return Camera(colmap_id=cam_info.uid, R_gt=cam_info.R, T_gt=cam_info.T, resolution=(cam_info.width, cam_info.height),
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, image_path=cam_info.image_path, depth_path=cam_info.depth_path,
+                  image_name=cam_info.image_name, uid=id, device=args.data_device)
 
 
 def cameraList_from_camInfos(cam_infos, resolution_scale, args):
