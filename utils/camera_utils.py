@@ -31,7 +31,7 @@ def loadCam(args, id, cam_info, resolution_scale):
     #     loaded_mask = resized_image_rgb[3:4, ...]
 
     return Camera(colmap_id=cam_info.uid, R_gt=cam_info.R, T_gt=cam_info.T, resolution=(cam_info.width, cam_info.height),
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, image_path=cam_info.image_path, depth_path=cam_info.depth_path,
+                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, image_path=cam_info.image_path, depth_path=cam_info.depth_path, normal_path=cam_info.normal_path,
                   image_name=cam_info.image_name, uid=id, device=args.data_device)
 
 

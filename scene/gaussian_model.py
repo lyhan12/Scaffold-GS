@@ -21,6 +21,8 @@ from plyfile import PlyData, PlyElement
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from utils.graphics_utils import fov2focal
+
 from scene.embedding import Embedding
 
     
@@ -236,13 +238,7 @@ class GaussianModel:
             self.voxel_size = median_dist.item()
             del init_dist
             del init_points
-            torch.cuda.empty_cache()
-
-        print(f'Initial voxel_size: {self.voxel_size}')
-        print(f"Spatial Lr Scale: {self.spatial_lr_scale}")
-        self.spatial_lr_scale  = 7.009
-
-        
+            torch.cuda.empty_cache()  
         
         points = self.voxelize_sample(points, voxel_size=self.voxel_size)
         fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
@@ -277,6 +273,10 @@ class GaussianModel:
         self.offset_denom = torch.zeros((self.get_anchor.shape[0]*self.n_offsets, 1), device="cuda")
         self.anchor_demon = torch.zeros((self.get_anchor.shape[0], 1), device="cuda")
 
+        print("Spatial LR Scale:" , training_args.spatial_lr_scale)
+        print("Position_LR_Init:", training_args.position_lr_init)
+        print("Offset_LR_Init:", training_args.offset_lr_init)
+
         
         
         if self.use_feat_bank:
@@ -296,8 +296,8 @@ class GaussianModel:
             ]
         elif self.appearance_dim > 0:
             l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
+                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
+                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
                 {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
                 {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -310,8 +310,8 @@ class GaussianModel:
             ]
         else:
             l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * self.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * self.spatial_lr_scale, "name": "offset"},
+                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
+                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
                 {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
                 {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
                 {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
@@ -323,12 +323,12 @@ class GaussianModel:
             ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
-        self.anchor_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
-                                                    lr_final=training_args.position_lr_final*self.spatial_lr_scale,
+        self.anchor_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*training_args.spatial_lr_scale,
+                                                    lr_final=training_args.position_lr_final*training_args.spatial_lr_scale,
                                                     lr_delay_mult=training_args.position_lr_delay_mult,
                                                     max_steps=training_args.position_lr_max_steps)
-        self.offset_scheduler_args = get_expon_lr_func(lr_init=training_args.offset_lr_init*self.spatial_lr_scale,
-                                                    lr_final=training_args.offset_lr_final*self.spatial_lr_scale,
+        self.offset_scheduler_args = get_expon_lr_func(lr_init=training_args.offset_lr_init*training_args.spatial_lr_scale,
+                                                    lr_final=training_args.offset_lr_final*training_args.spatial_lr_scale,
                                                     lr_delay_mult=training_args.offset_lr_delay_mult,
                                                     max_steps=training_args.offset_lr_max_steps)
         
@@ -568,7 +568,46 @@ class GaussianModel:
             
         return optimizable_tensors
 
-    def prune_anchor(self,mask):
+    def insert_anchor(self, anchors, scale=0.0005):
+            new_scaling = torch.ones_like(anchors).repeat([1,2]).float().cuda()*scale
+            new_scaling = torch.log(new_scaling)
+            new_rotation = torch.zeros([anchors.shape[0], 4]).float().cuda()
+            new_rotation[:,0] = 1.0
+
+            new_opacities = inverse_sigmoid(0.1 * torch.ones((anchors.shape[0], 1), dtype=torch.float, device="cuda"))
+            new_feat = torch.zeros([anchors.shape[0], self.feat_dim]).float().cuda()
+
+            new_offsets = torch.zeros_like(anchors).unsqueeze(dim=1).repeat([1,self.n_offsets,1]).float().cuda()
+
+            d = {
+                "anchor": anchors,
+                "scaling": new_scaling,
+                "rotation": new_rotation,
+                "anchor_feat": new_feat,
+                "offset": new_offsets,
+                "opacity": new_opacities,
+            } 
+
+            temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.anchor_demon
+            self.anchor_demon = temp_anchor_demon
+
+            temp_opacity_accum = torch.cat([self.opacity_accum, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.opacity_accum
+            self.opacity_accum = temp_opacity_accum
+
+            torch.cuda.empty_cache()
+            
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self._anchor = optimizable_tensors["anchor"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+            self._anchor_feat = optimizable_tensors["anchor_feat"]
+            self._offset = optimizable_tensors["offset"]
+            self._opacity = optimizable_tensors["opacity"]
+
+
+    def prune_anchor(self, mask):
         valid_points_mask = ~mask
 
         optimizable_tensors = self._prune_anchor_optimizer(valid_points_mask)
@@ -582,8 +621,8 @@ class GaussianModel:
 
     
     def anchor_growing(self, grads, threshold, offset_mask):
-        ## 
         init_length = self.get_anchor.shape[0]*self.n_offsets
+        print("Offset Gradient Based Anchor Growing Called")
         for i in range(self.update_depth):
             # update threshold
             cur_threshold = threshold*((self.update_hierachy_factor//2)**i)
@@ -597,6 +636,7 @@ class GaussianModel:
             candidate_mask = torch.logical_and(candidate_mask, rand_mask)
             
             length_inc = self.get_anchor.shape[0]*self.n_offsets - init_length
+            print(f"[Iter {i}] Splat Num / Length Inc:", self.get_anchor.shape[0]*self.n_offsets, length_inc)
             if length_inc == 0:
                 if i > 0:
                     continue
@@ -631,6 +671,8 @@ class GaussianModel:
                 remove_duplicates = reduce(torch.logical_or, remove_duplicates_list)
             else:
                 remove_duplicates = (selected_grid_coords_unique.unsqueeze(1) == grid_coords).all(-1).any(-1).view(-1)
+
+            print(f"Remove Duplicates : {remove_duplicates.sum()/len(remove_duplicates)}")
 
             remove_duplicates = ~remove_duplicates
             candidate_anchor = selected_grid_coords_unique[remove_duplicates]*cur_size
@@ -677,31 +719,182 @@ class GaussianModel:
                 self._anchor_feat = optimizable_tensors["anchor_feat"]
                 self._offset = optimizable_tensors["offset"]
                 self._opacity = optimizable_tensors["opacity"]
+
+    def anchor_growing_by_dist(self, dist_threshold, offset_mask):
+        print("Offset Based Anchor Growing Called")
+
+        offsets = self._offset * self.get_scaling[:,:3].unsqueeze(dim=1)
+
+        dists = offsets.norm(dim=-1).view(-1)
+        all_xyz = (self.get_anchor.unsqueeze(dim=1) + offsets).view(-1, 3)
+        candidate_mask = (dists > dist_threshold) 
+
+        # candidate_mask = torch.logical_and(candidate_mask, offset_mask)
+
+        candidate_anchor = all_xyz[candidate_mask]
+        print("Candidate Num: ", len(candidate_anchor))
+
+        if candidate_anchor.shape[0] > 0:
+            new_scaling = torch.ones_like(candidate_anchor).repeat([1,2]).float().cuda()*0.01 # *0.05
+            new_scaling = torch.log(new_scaling)
+            new_rotation = torch.zeros([candidate_anchor.shape[0], 4], device=candidate_anchor.device).float()
+            new_rotation[:,0] = 1.0
+
+            new_opacities = inverse_sigmoid(0.1 * torch.ones((candidate_anchor.shape[0], 1), dtype=torch.float, device="cuda"))
+
+            new_feat = self._anchor_feat.unsqueeze(dim=1).repeat([1, self.n_offsets, 1]).view([-1, self.feat_dim])[candidate_mask]
+
+            new_offsets = torch.zeros_like(candidate_anchor).unsqueeze(dim=1).repeat([1,self.n_offsets,1]).float().cuda()
+
+            d = {
+                "anchor": candidate_anchor,
+                "scaling": new_scaling,
+                "rotation": new_rotation,
+                "anchor_feat": new_feat,
+                "offset": new_offsets,
+                "opacity": new_opacities,
+            }
+            
+
+            temp_anchor_demon = torch.cat([self.anchor_demon, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.anchor_demon
+            self.anchor_demon = temp_anchor_demon
+
+            temp_opacity_accum = torch.cat([self.opacity_accum, torch.zeros([new_opacities.shape[0], 1], device='cuda').float()], dim=0)
+            del self.opacity_accum
+            self.opacity_accum = temp_opacity_accum
+
+            torch.cuda.empty_cache()
+            
+            optimizable_tensors = self.cat_tensors_to_optimizer(d)
+            self._anchor = optimizable_tensors["anchor"]
+            self._scaling = optimizable_tensors["scaling"]
+            self._rotation = optimizable_tensors["rotation"]
+            self._anchor_feat = optimizable_tensors["anchor_feat"]
+            self._offset = optimizable_tensors["offset"]
+            self._opacity = optimizable_tensors["opacity"]
+
+
                 
 
-
-    def adjust_anchor(self, check_interval=100, success_threshold=0.8, grad_threshold=0.0002, min_opacity=0.005):
-        # # adding anchors
-        grads = self.offset_gradient_accum / self.offset_denom # [N*k, 1]
-        grads[grads.isnan()] = 0.0
-        grads_norm = torch.norm(grads, dim=-1)
-        offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)
-        
-        self.anchor_growing(grads_norm, grad_threshold, offset_mask)
-        
-        # update offset_denom
-        self.offset_denom[offset_mask] = 0
+    def pad_zero_to_data(self):
         padding_offset_demon = torch.zeros([self.get_anchor.shape[0]*self.n_offsets - self.offset_denom.shape[0], 1],
                                            dtype=torch.int32, 
                                            device=self.offset_denom.device)
         self.offset_denom = torch.cat([self.offset_denom, padding_offset_demon], dim=0)
 
-        self.offset_gradient_accum[offset_mask] = 0
         padding_offset_gradient_accum = torch.zeros([self.get_anchor.shape[0]*self.n_offsets - self.offset_gradient_accum.shape[0], 1],
                                            dtype=torch.int32, 
                                            device=self.offset_gradient_accum.device)
         self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, padding_offset_gradient_accum], dim=0)
+
+    def add_anchor_from_depth(self, camera, depth, mask):
+        depth = depth.cpu()
+        mask = mask.cpu()
+
+        W = camera.image_width
+        H = camera.image_height
+        fx = fov2focal(camera.FoVx, W)
+        fy = fov2focal(camera.FoVy, H)
+        cx = .5 * W
+        cy = .5 * H
+
+        K = torch.tensor([ [fx, 0, cx], [0, fy, cy], [0, 0, 1] ], dtype=torch.float32)
         
+        xs = torch.arange(W)
+        ys = torch.arange(H)
+        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
+        grid_z = torch.ones_like(grid_x)
+        # depth_prior
+
+        rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
+        rays = rays * depth
+        rays = rays.reshape(3, -1)
+
+        import numpy as np
+        import matplotlib.pyplot as plt
+
+        mask_np = mask.squeeze().numpy()
+        depth_np = depth.numpy()
+
+
+        # # Create subplots
+        # fig, axs = plt.subplots(1, 2, figsize=(12, 6))
+
+        # # Plot the mask image
+        # mask_img = axs[0].imshow(mask_np, cmap='gray')
+        # axs[0].set_title("Mask Image")
+        # axs[0].axis('off')
+        # fig.colorbar(mask_img, ax=axs[0], orientation='vertical')
+
+        # # Plot the depth image
+        # depth_img = axs[1].imshow(depth_np, cmap='turbo')
+        # axs[1].set_title("Depth Image")
+        # axs[1].axis('off')
+        # fig.colorbar(depth_img, ax=axs[1], orientation='vertical')
+
+        # plt.show()
+
+        pts_cam = torch.inverse(K) @ rays
+        pts_cam = pts_cam.reshape(3, H, W)
+
+        grid_w = torch.ones_like(grid_x).float()
+        pts_cam_hom = torch.cat([pts_cam, grid_w.unsqueeze(0)], dim=0)
+        pts_cam_hom = pts_cam_hom.reshape(4, -1)
+        
+
+        T_wc = torch.inverse(camera.world_view_transform.transpose(0,1)).cpu()
+
+        pts_w_hom = T_wc@pts_cam_hom
+
+        pts_w = pts_w_hom[:3, :].transpose(1,0)
+
+        pts_samples = pts_w[::16,:].cuda()
+
+        self.insert_anchor(pts_samples)
+        self.pad_zero_to_data()
+
+        if True:
+            points = pts_cam.reshape(3, -1)
+            colors = camera.original_image.reshape(3, -1).cpu()
+
+            import open3d as o3d
+            points_np = points.numpy().T  # Shape will be (1333603, 3)
+            colors_np = colors.numpy().T  # Shape will be (1333603, 3)
+
+            # Create an Open3D point cloud object
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points_np)
+            pcd.colors = o3d.utility.Vector3dVector(colors_np)
+
+            # Visualize the point cloud
+            o3d.visualization.draw_geometries([pcd])
+
+        import ipdb
+        ipdb.set_trace()
+
+
+    def adjust_anchor(self, check_interval=100, success_threshold=0.8, grad_threshold=0.0002, min_opacity=0.005):
+        # update offset_denom
+
+        grads = self.offset_gradient_accum / self.offset_denom # [N*k, 1]
+        grads[grads.isnan()] = 0.0
+        grads_norm = torch.norm(grads, dim=-1)
+
+        offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)
+        self.offset_denom[offset_mask] = 0
+        self.offset_gradient_accum[offset_mask] = 0
+
+     
+        # # adding anchors
+        self.anchor_growing(grads_norm, grad_threshold, offset_mask)
+        self.pad_zero_to_data()
+
+        dist_threshold = 1.0
+        offset_mask = (self.offset_denom > check_interval*success_threshold*0.5).squeeze(dim=1)
+        # self.anchor_growing_by_dist(dist_threshold, offset_mask)
+        self.pad_zero_to_data()
+ 
         # # prune anchors
         prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
         anchors_mask = (self.anchor_demon > check_interval*success_threshold).squeeze(dim=1) # [N, 1]

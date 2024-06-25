@@ -80,6 +80,82 @@ def pearson_depth_loss(depth_src, depth_target):
     return 1 - co
 
 
+def pearson_depth_loss_v2(depth_src, depth_target):
+    #co = pearson(depth_src.reshape(-1), depth_target.reshape(-1))
+
+    src = depth_src - depth_src.mean()
+    target = depth_target - depth_target.mean()
+
+    src = src / (src.std() + 1e-6)
+    target = target / (target.std() + 1e-6)
+
+    co = (src * target).mean()
+    assert not torch.any(torch.isnan(co))
+    return 1 - co
+
+def pearson_depth_transform(depth_in, depth_ref, mask):
+
+    mean_ref = depth_ref[mask].mean()
+    std_ref = depth_ref[mask].std()
+
+    mean_in = depth_in[mask].mean()
+    std_in = depth_in[mask].std()
+
+    co_masked = (depth_in[mask] - mean_in) / (std_in + 1e-6) * (depth_ref[mask] - mean_ref) / (std_ref + 1e-6)
+
+    depth_out = (depth_ref - mean_ref)*std_in/(std_ref + 1e-6) + mean_in
+
+
+
+    return depth_out
+
+def pearson_depth_transform_v2(depth_ref, depth_in, mask, inv_ref=False, inv_in=False, use_inv=True):
+
+
+    data_in = depth_in[mask].clone()
+    data_ref = depth_ref[mask].clone()
+
+    if inv_in:
+        d_in = 1. / (data_in + 1e-6)
+        d_in_inv = data_in
+    else:
+        d_in = data_in
+        d_in_inv = 1. / (data_in + 1e-6)
+
+
+    if inv_ref:
+        d_ref = 1. / (data_ref + 1e-6)
+        d_ref_inv = data_ref
+    else:
+        d_ref = data_ref
+        d_ref_inv = 1. / (data_ref + 1e-6)
+
+    if use_inv:
+        mean_ref = d_ref_inv[mask].mean()
+        std_ref = d_ref_inv[mask].std()
+
+        mean_in = d_in_inv[mask].mean()
+        std_in = d_in_inv[mask].std()
+
+        d_out_inv = (d_in_inv - mean_in)*std_ref/(std_in + 1e-6) + mean_ref
+        d_out = 1. / (d_out_inv + 1e-6)
+    else:
+        mean_ref = d_ref[mask].mean()
+        std_ref = d_ref[mask].std()
+
+        mean_in = d_in[mask].mean()
+        std_in = d_in[mask].std()
+
+        d_out = (d_in - mean_in)*std_ref/(std_in + 1e-6) + mean_ref
+
+    return d_out
+
+
+
+
+
+
+
 def local_pearson_loss(depth_src, depth_target, box_p, p_corr):
         # Randomly select patch, top left corner of the patch (x_0,y_0) has to be 0 <= x_0 <= max_h, 0 <= y_0 <= max_w
         num_box_h = math.floor(depth_src.shape[0]/box_p)

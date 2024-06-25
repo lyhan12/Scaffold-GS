@@ -18,7 +18,7 @@ from utils.general_utils import PILtoTorch, NP_resize
 from PIL import Image
 
 class Camera(nn.Module):
-    def __init__(self, colmap_id, R_gt, T_gt, resolution, FoVx, FoVy, image_path, depth_path,
+    def __init__(self, colmap_id, R_gt, T_gt, resolution, FoVx, FoVy, image_path, depth_path, normal_path,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, device = "cuda"
                  ):
@@ -27,21 +27,36 @@ class Camera(nn.Module):
         self.uid = uid
         self.colmap_id = colmap_id
 
-        self.R_gt = R_gt
-        self.T_gt = T_gt
+        self.R_gt = R_gt.copy()
+        self.T_gt = T_gt.copy()
+        print(self.T_gt)
 
-        T_est = torch.eye(4, device=device)
-        T_est[:3, :3] = torch.Tensor(R_gt)
-        T_est[:3, 3] = torch.Tensor(T_gt)
 
-        self.R_est = T_est[:3, :3]
-        self.T_est = T_est[:3, 3]
+        R = self.R_gt.copy()
+        T = self.T_gt.copy()
+
+
+        # Generate a random vector
+        rand_vec = np.random.randn(3)
+
+        # Normalize the random vector to have unit norm
+        rand_dir = rand_vec / np.linalg.norm(rand_vec)
+        norm = 0.3
+
+        # Add the random unit vector to T_gt
+        # T = T + norm * rand_dir
+        T = T_gt + np.array([-0.1, 0.1, 0.1])
+
+
+        self.R_init = R.copy()
+        self.T_init = T.copy()
 
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
         self.image_path = image_path
         self.depth_path = depth_path
+        self.normal_path = normal_path
         self.resolution_scale = 1.0
 
 
@@ -68,8 +83,8 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
 
-        self.R = torch.tensor(R_gt).to(device)
-        self.T = torch.tensor(T_gt).to(device)
+        self.R = torch.tensor(R).to(device).clone()
+        self.T = torch.tensor(T).to(device).clone()
 
         # self.world_view_transform = torch.tensor(getWorld2View2(R_gt, T_gt, trans, scale)).transpose(0, 1).cuda()
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
@@ -96,8 +111,11 @@ class Camera(nn.Module):
 
         print("GT R:", self.R_gt)
         print("EST R:", self.R)
+        print("INIT R:", self.R_init)
         print("GT T:", self.T_gt)
         print("EST T:", self.T)
+        print("INIT T:", self.T_init)
+        print(f"T Error: {np.linalg.norm(self.T.detach().cpu().numpy() - self.T_gt)} (cur) / {np.linalg.norm(self.T_init - self.T_gt)} (init)")
 
 
     @property
@@ -137,6 +155,38 @@ class Camera(nn.Module):
         resized_depth = torch.Tensor((resized_depth - resized_depth.min())/(resized_depth.max() - resized_depth.min())).cuda()
 
         return resized_depth
+
+    @property
+    def normal(self):
+        normal_pil = Image.open(self.normal_path)
+        normal_torch = PILtoTorch(normal_pil, (self.image_width, self.image_height))
+    
+        normal = normal_torch[:3, ...]
+
+        gt_alpha_mask = None
+        if normal_torch.shape[1] == 4:
+            gt_alpha_mask = normal_torch[3:4, ...]
+
+        normal = normal.clamp(0.0, 1.0).to(self.device)
+
+        if gt_alpha_mask is not None:
+            normal *= gt_alpha_mask.to(self.device)
+        else:
+            normal *= torch.ones((1, self.image_height, self.image_width), device=self.device)
+
+
+        normal = 2.0 * normal - 1.0
+        normal = normal.permute(1,2,0)
+
+        normal = normal @ torch.diag(
+            torch.tensor(
+                [1, -1, -1], device=normal.device, dtype=normal.dtype)
+        )
+        normal = normal.permute(2,0,1)
+        normal = torch.nn.functional.normalize(normal, dim=0)
+
+
+        return normal
 
 
 class MiniCam:

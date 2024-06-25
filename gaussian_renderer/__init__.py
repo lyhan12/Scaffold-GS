@@ -15,6 +15,10 @@ import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
 
+
+from utils.general_utils import build_rotation
+import torch.nn.functional as F
+
 def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False):
     ## view frustum filtering for acceleration    
     if visible_mask is None:
@@ -105,6 +109,26 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     offsets = offsets * scaling_repeat[:,:3]
     xyz = repeat_anchor + offsets
 
+
+    if False:
+
+        import ipdb
+        ipdb.set_trace()
+
+        points_np = xyz.clone().detach().cpu().numpy()
+        colors_np = color.clone().detach().cpu().numpy()
+
+        import open3d as o3d
+
+        # Create an Open3D point cloud object
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points_np)
+        pcd.colors = o3d.utility.Vector3dVector(colors_np)
+
+        # Visualize the point cloud
+        o3d.visualization.draw_geometries([pcd])
+
+
     if is_training:
         return xyz, color, opacity, scaling, rot, neural_opacity, mask
     else:
@@ -122,6 +146,15 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         xyz, color, opacity, scaling, rot, neural_opacity, mask = generate_neural_gaussians(viewpoint_camera, pc, visible_mask, is_training=is_training)
     else:
         xyz, color, opacity, scaling, rot = generate_neural_gaussians(viewpoint_camera, pc, visible_mask, is_training=is_training)
+
+    # print("XYZ Shape:", xyz.shape)
+
+    render_anchor = True
+    if render_anchor:
+        # import ipdb
+        # ipdb.set_trace()
+        pass
+
     
 
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -155,9 +188,35 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
 
+
+    rotations_mat = build_rotation(rot)
+    min_scales = torch.argmin(scaling, dim=1)
+    indices = torch.arange(min_scales.shape[0])
+    normal = rotations_mat[indices, :, min_scales]
+
+    view_dir = xyz - viewpoint_camera.camera_center
+    normal   = normal * ((((view_dir * normal).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
+
+    R_cw = viewpoint_camera.R.T.clone().detach().cuda().to(torch.float32)
+    normal = (R_cw @ normal.transpose(0, 1)).transpose(0, 1)
+
+    render_normal, _, _, _, _= rasterizer(
+        means3D = xyz,
+        means2D = screenspace_points,
+        shs = None,
+        colors_precomp = normal,
+        opacities = opacity,
+        scales = scaling,
+        rotations = rot,
+        cov3D_precomp = None,
+        theta = viewpoint_camera.cam_rot_delta,
+        rho = viewpoint_camera.cam_trans_delta)
+
+    render_normal = torch.nn.functional.normalize(render_normal, dim=0)
+
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    rendered_image, radii, depth, opacity, n_touched  = rasterizer(
+    render_image, radii, render_depth, render_opacity, n_touched  = rasterizer(
         means3D = xyz,
         means2D = screenspace_points,
         shs = None,
@@ -171,23 +230,27 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     if is_training:
-        return {"render": rendered_image,
+        return {"render": render_image,
                 "viewspace_points": screenspace_points,
                 "visibility_filter" : radii > 0,
                 "radii": radii,
                 "selection_mask": mask,
                 "neural_opacity": neural_opacity,
                 "scaling": scaling,
-                "depth": depth,
-                "opacity": opacity,
+                "depth": render_depth,
+                "normal": render_normal,
+                "opacity": render_opacity,
+                "n_touched": n_touched,
                 }
     else:
-        return {"render": rendered_image,
+        return {"render": render_image,
                 "viewspace_points": screenspace_points,
                 "visibility_filter" : radii > 0,
                 "radii": radii,
-                "depth": depth,
-                "opacity": opacity
+                "depth": render_depth,
+                "normal": render_normal,
+                "opacity": render_opacity,
+                "n_touched": n_touched,
                 }
 
 

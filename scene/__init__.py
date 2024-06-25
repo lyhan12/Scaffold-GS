@@ -105,5 +105,22 @@ class Scene:
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]
 
+    def getTrainCameraBundles(self, scale=1.0):
+        train_cameras = self.train_cameras[scale]
+
+        train_camera_bundles = []
+        for idx in range(len(train_cameras)):
+            camera_bundle = []
+            if idx-1 >= 0:
+                camera_bundle.append(train_cameras[idx-1])
+            camera_bundle.append(train_cameras[idx])
+            if idx+1 <= len(train_cameras)-1:
+                camera_bundle.append(train_cameras[idx+1])
+
+            train_camera_bundles.append(camera_bundle)
+ 
+        return train_camera_bundles
+
+
     def getTestCameras(self, scale=1.0):
         return self.test_cameras[scale]

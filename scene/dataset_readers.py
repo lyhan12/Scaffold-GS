@@ -40,6 +40,7 @@ class CameraInfo(NamedTuple):
     FovX: np.array
     image_path: str
     depth_path: str
+    normal_path: str
     image_name: str
     width: int
     height: int
@@ -111,11 +112,12 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image = Image.open(image_path)
 
         depth_path = os.path.join(os.path.dirname(images_folder), 'depths', image_name+'.npy')
+        normal_path = os.path.join(os.path.dirname(images_folder), 'normals', image_name+'.png')
 
         # print(f'image: {image.size}')
 
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX,
-                              image_path=image_path, depth_path=depth_path, image_name=image_name, width=width, height=height)
+                              image_path=image_path, depth_path=depth_path, normal_path=normal_path, image_name=image_name, width=width, height=height)
         cam_infos.append(cam_info)
     sys.stdout.write('\n')
     return cam_infos
