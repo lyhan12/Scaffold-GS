@@ -19,6 +19,26 @@ from scene.gaussian_model import GaussianModel
 from utils.general_utils import build_rotation
 import torch.nn.functional as F
 
+import open3d as o3d
+
+
+def draw_gaussians_open3d(points, colors):
+    points_np = points.clone().detach().cpu().numpy()
+    colors_np = colors.clone().detach().cpu().numpy()
+
+    # Create an Open3D point cloud object
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(points_np)
+    pcd.colors = o3d.utility.Vector3dVector(colors_np)
+
+    # Visualize the point cloud
+    o3d.visualization.draw_geometries([pcd])
+
+    return
+
+
+
+
 def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False):
     ## view frustum filtering for acceleration    
     if visible_mask is None:

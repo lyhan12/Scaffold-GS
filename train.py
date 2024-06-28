@@ -22,6 +22,8 @@ os.system('echo $CUDA_VISIBLE_DEVICES')
 
 import torch
 import torchvision
+from torchvision import transforms
+
 import json
 import wandb
 import time
@@ -34,7 +36,7 @@ import torchvision.transforms.functional as tf
 import lpips
 from random import randint
 from utils.loss_utils import l1_loss, ssim, local_pearson_loss, pearson_depth_loss, pearson_depth_transform
-from gaussian_renderer import prefilter_voxel, render, network_gui
+from gaussian_renderer import prefilter_voxel, render, network_gui, generate_neural_gaussians, draw_gaussians_open3d
 import sys
 from scene import Scene, GaussianModel
 from utils.general_utils import safe_state
@@ -167,11 +169,35 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     else:
         scene = Scene(dataset, gaussians, ply_path=ply_path, shuffle=False)
 
+
     gaussians.training_setup(opt)
 
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
+
+    bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+    background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+
+
+    target_cam1 = scene.getTrainCameras().copy()[0]
+    target_cam2 = scene.getTrainCameras().copy()[4]
+    target_cam3 = scene.getTrainCameras().copy()[8]
+    # target_visible_mask = prefilter_voxel(target_cam, gaussians, pipe, background)
+
+    # with torch.no_grad():
+    #     gaussians.prune_anchor(~target_visible_mask)
+
+    # xyz, color, _, _, _ = generate_neural_gaussians(target_cam, gaussians)
+
+    mask = torch.ones(gaussians.get_anchor.shape[0]).bool().cuda()
+    with torch.no_grad():
+        gaussians.prune_anchor(mask)
+
+    # gaussians.create_from_depth(target_cam1)
+    gaussians.create_from_depth(target_cam2)
+    # gaussians.create_from_depth(target_cam3)
+
 
 
     viewpoint_stack = None
@@ -199,34 +225,33 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         gaussians.update_learning_rate(iteration)
 
-        bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
         
         # Pick a random Camera
         if not viewpoint_stack:
-            viewpoint_stack = scene.getTrainCameras().copy()
+            viewpoint_stack = scene.getTrainCameras().copy()[:12:4]
+
+        viewpoint_cam = viewpoint_stack.pop(0)
+        print(viewpoint_cam.image_path, iteration)
 
 
-        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-
-        opt_params = []
-        opt_params.append(
-            {
-                "params": [viewpoint_cam.cam_rot_delta],
-                "lr": 0.003,
-                "name": "rot_{}".format(viewpoint_cam.uid),
-            }
-        )
-        opt_params.append(
-            {
-                "params": [viewpoint_cam.cam_trans_delta],
-                "lr": 0.001,
-                "name": "trans_{}".format(viewpoint_cam.uid),
-            }
-        )
-        pose_optimizer = torch.optim.Adam(opt_params)
-        pose_optimizer.zero_grad()
+        # opt_params = []
+        # opt_params.append(
+        #     {
+        #         "params": [viewpoint_cam.cam_rot_delta],
+        #         "lr": 0.003,
+        #         "name": "rot_{}".format(viewpoint_cam.uid),
+        #     }
+        # )
+        # opt_params.append(
+        #     {
+        #         "params": [viewpoint_cam.cam_trans_delta],
+        #         "lr": 0.001,
+        #         "name": "trans_{}".format(viewpoint_cam.uid),
+        #     }
+        # )
+        # pose_optimizer = torch.optim.Adam(opt_params)
+        # pose_optimizer.zero_grad()
 
 
         # Render
@@ -240,6 +265,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad)
+
  
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
@@ -256,6 +282,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         depth_gt = viewpoint_cam.depth
         normal_gt = viewpoint_cam.normal
 
+        depth = transforms.Resize(depth_gt.shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
+        normal = transforms.Resize(normal_gt.shape[1:], interpolation=torchvision.transforms.InterpolationMode.NEAREST)(normal)
 
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -264,27 +292,27 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         scaling_reg = scaling.prod(dim=1).mean()
         pearson_loss = pearson_depth_loss(depth.squeeze(0), depth_gt)
-        pearson_loss_local = local_pearson_loss(depth.squeeze(0), depth_gt, 100, 1.0)
+        # pearson_loss_local = local_pearson_loss(depth.squeeze(0), depth_gt, 100, 1.0)
 
         # normal_loss = mean_angular_error(
         #     pred=normal,
         #     gt=normal_gt,
         # ).mean()
-        normal_loss = torch.abs(normal_gt - normal).mean()
+        # normal_loss = torch.abs(normal_gt - normal).mean()
 
         loss += 0.01 * scaling_reg
         loss += 0.20 * pearson_loss
         # loss += 0.20 * normal_loss
-        loss += 0.0 * pearson_loss_local 
+        # loss += 0.0 * pearson_loss_local 
 
 
         loss.backward()
 
-        if iteration > 100:
-            with torch.no_grad():
-                pose_optimizer.step()
+        # if iteration > 10:
+        #     with torch.no_grad():
+        #         pose_optimizer.step()
 
-                converged = update_pose(viewpoint_cam)
+        #         converged = update_pose(viewpoint_cam)
 
 
         
@@ -304,7 +332,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), wandb, logger)
             if (iteration in saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
+
+                point_cloud_path = os.path.join(scene.model_path, "point_cloud/iteration_{}".format(iteration))
+                gaussians.save_ply_3dgs(os.path.join(point_cloud_path, "point_cloud.ply"), *generate_neural_gaussians(viewpoint_cam, gaussians))
+
+                # scene.save(iteration)
 
             
             # densification
@@ -312,7 +344,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                 # add statis
                 gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
 
-                # if iteration <= 500:
+                # if iteration <= 10:
 
                 #     opacity_mask = (opacity_image > 0.8).squeeze(0)
                 #     depth_prior = pearson_depth_transform(depth.squeeze(0), depth_gt.squeeze(0), opacity_mask).cpu()
@@ -401,8 +433,13 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
     if iteration in testing_iterations:
         scene.gaussians.eval()
         torch.cuda.empty_cache()
+
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+
+        validation_configs = ({'name': 'test', 'cameras' : scene.getTrainCameras().copy()[:12:4]},
+                              {'name': 'train', 'cameras' : scene.getTrainCameras().copy()[:12:4]})
+
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
@@ -420,35 +457,26 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
                     render_pkg= renderFunc(viewpoint, scene.gaussians, *renderArgs, visible_mask=voxel_visible_mask)
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)
 
-                    depth_raw = render_pkg["depth"]
-                    normal_raw = render_pkg["normal"]
                     opacity = render_pkg["opacity"]
-                    depth = depth_raw
+
+                    depth = render_pkg["depth"]
+                    normal = render_pkg["normal"]
 
                     from utils.general_utils import colormap
                     # depth_norm = depth.max()
                     # depth_map = depth / depth_norm
                     depth_map = colormap(depth.cpu().numpy()[0], cmap='turbo')
 
-                    normal_map = normal_raw * 0.5 + 0.5
+                    normal_map = normal * 0.5 + 0.5
 
                     camera = viewpoint
-                    W = camera.image_width
-                    H = camera.image_height
-                    fx = fov2focal(camera.FoVx, W)
-                    fy = fov2focal(camera.FoVy, H)
-                    cx = .5 * W
-                    cy = .5 * H
-
-                    K = torch.tensor([ [fx, 0, cx], [0, fy, cy], [0, 0, 1] ], dtype=torch.float32)
-
+                    K = camera.K()
                     normal_surf = surface_normal_from_depth(depth.unsqueeze(0), K).squeeze(0)
                     normal_surf_map = normal_surf * 0.5 + 0.5
 
 
-
-
                     gt_rgb = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
                     gt_normal_map = torch.clamp((1. + viewpoint.normal.to("cuda")) / 2., 0.0, 1.0)
 
                     gt_depth = torch.clamp(viewpoint.depth[None].to("cuda"), 0.0, 1.0)
@@ -461,13 +489,13 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
                     normal_gt_surf_map = normal_gt_surf * 0.5 + 0.5
 
 
-                    opacity_mask = (opacity > 0.8).squeeze(0)
-                    gt_depth_scaled = pearson_depth_transform(depth.squeeze(0), gt_depth.squeeze(0), opacity_mask).unsqueeze(0)
-                    # gt_depth_scaled_map = gt_depth_scaled / depth_norm
-                    gt_depth_scaled_map = colormap(gt_depth_scaled.cpu().numpy()[0], cmap="turbo")
+                    # opacity_mask = (opacity > 0.8).squeeze(0)
+                    # gt_depth_scaled = pearson_depth_transform(depth.squeeze(0), gt_depth.squeeze(0), opacity_mask).unsqueeze(0)
+                    # # gt_depth_scaled_map = gt_depth_scaled / depth_norm
+                    # gt_depth_scaled_map = colormap(gt_depth_scaled.cpu().numpy()[0], cmap="turbo")
 
-                    depth_diff = depth - gt_depth_scaled
-                    depth_diff_map = colormap(depth_diff.cpu().numpy()[0], cmap="turbo")
+                    # depth_diff = depth - gt_depth_scaled
+                    # depth_diff_map = colormap(depth_diff.cpu().numpy()[0], cmap="turbo")
 
 
                     if tb_writer and (idx < 30):
@@ -476,8 +504,8 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth_map[None], global_step=iteration)
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal".format(viewpoint.image_name), normal_map[None], global_step=iteration)
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_surf".format(viewpoint.image_name), normal_surf_map[None], global_step=iteration)
-                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth_scaled".format(viewpoint.image_name), gt_depth_scaled_map[None], global_step=iteration)
-                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth_diff_map".format(viewpoint.image_name), depth_diff_map[None], global_step=iteration)
+                        # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth_scaled".format(viewpoint.image_name), gt_depth_scaled_map[None], global_step=iteration)
+                        # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth_diff_map".format(viewpoint.image_name), depth_diff_map[None], global_step=iteration)
                         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/opacity".format(viewpoint.image_name), opacity[None], global_step=iteration)
 
                         if wandb:
@@ -708,14 +736,14 @@ if __name__ == "__main__":
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     # default_iterations = [100] + [200] + [300] + [400] + [500] + [1000] + [1500] + [2000] + [3000] + list(range(10000, 60000, 10000))
     # default_iterations = [500] + [1000] + [1500] + [2000] + [3000] + list(range(10000, 60000, 10000))
-    default_iterations = [3000]
+    default_iterations = [1, 10, 50, 100, 200, 300, 400, 500]
     debug_iterations = []
     iterations = default_iterations + debug_iterations
 
     parser.add_argument("--test_iterations", nargs="+", type=int, default=iterations)
     parser.add_argument("--save_iterations", nargs="+", type=int, default=iterations)
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=iterations)
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])#iterations)
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--gpu", type=str, default = '-1')
     args = parser.parse_args(sys.argv[1:])

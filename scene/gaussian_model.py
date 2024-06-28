@@ -25,6 +25,10 @@ from utils.graphics_utils import fov2focal
 
 from scene.embedding import Embedding
 
+from torchvision import transforms
+import open3d as o3d
+from utils.sh_utils import RGB2SH
+
     
 class GaussianModel:
 
@@ -228,6 +232,61 @@ class GaussianModel:
         
         return data
 
+    def create_from_depth(self, cam):
+
+        depth = cam.depth.cpu()
+        normal = cam.normal.cpu()
+        color = transforms.Resize(depth.shape)(cam.original_image.cpu())
+
+        
+        # assert depth.shape == normal.shape
+
+        K_depth = cam.K(depth.shape).cpu()
+        H_depth = depth.shape[0]
+        W_depth = depth.shape[1]
+
+        xs = torch.arange(W_depth)
+        ys = torch.arange(H_depth)
+        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
+        grid_z = torch.ones_like(grid_x)
+        # depth_prior
+
+        rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
+        rays = rays * depth
+        rays = rays.reshape(3, -1)
+
+        pts_cam = torch.inverse(K_depth) @ rays
+        pts_cam = pts_cam.reshape(3, H_depth, W_depth)
+
+        grid_w = torch.ones_like(grid_x).float()
+        pts_cam_hom = torch.cat([pts_cam, grid_w.unsqueeze(0)], dim=0)
+        pts_cam_hom = pts_cam_hom.reshape(4, -1)
+        
+
+        T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
+
+        pts_w_hom = T_wc@pts_cam_hom
+
+        pts_w = pts_w_hom[:3, :].transpose(1,0)
+
+        # pts_samples = pts_w[::16,:].cuda()
+
+        self.insert_anchor(pts_w.cuda())
+        self.pad_zero_to_data()
+
+
+        if False:
+            points = pts_w.numpy()
+            colors = color.permute(1, 2, 0).reshape(-1, 3).numpy()
+
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(points)
+            pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        return
+
+
+
     def create_from_pcd(self, pcd : BasicPointCloud):
         points = pcd.points[::self.ratio]
 
@@ -395,6 +454,55 @@ class GaussianModel:
         for i in range(self._rotation.shape[1]):
             l.append('rot_{}'.format(i))
         return l
+
+
+    def construct_list_of_attributes_3dgs(self, xyz, color, scaling, rot):
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(3):
+            l.append('f_dc_{}'.format(i))
+        l.append('opacity')
+        for i in range(scaling.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(rot.shape[1]):
+            l.append('rot_{}'.format(i))
+        return l
+
+
+    def save_ply_3dgs(self, path, xyz, color, opacities, scale, rotation):
+        mkdir_p(os.path.dirname(path))
+
+        xyz = xyz.detach().cpu().numpy()
+        normals = np.zeros_like(xyz)
+        f_dc = RGB2SH(color).detach().cpu().numpy()
+        opacities = self.inverse_opacity_activation(opacities).detach().cpu().numpy()
+        scale = self.scaling_inverse_activation(scale).detach().cpu().numpy()
+        rotation = rotation.detach().cpu().numpy()
+
+        l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
+        # All channels except the 3 DC
+        for i in range(3):
+            l.append('f_dc_{}'.format(i))
+        l.append('opacity')
+        for i in range(scale.shape[1]):
+            l.append('scale_{}'.format(i))
+        for i in range(rotation.shape[1]):
+            l.append('rot_{}'.format(i))
+        dtype_full = [(attribute, 'f4') for attribute in l]
+
+        elements = np.empty(xyz.shape[0], dtype=dtype_full)
+        attributes = np.concatenate((xyz, normals, f_dc, opacities, scale, rotation), axis=1)
+
+
+        max_chunk_size = 1_000_000
+        for i in range(0, xyz.shape[0], max_chunk_size):
+            if i+max_chunk_size < xyz.shape[0]:
+                elements[i:i+max_chunk_size] = list(map(tuple, attributes[i:i+max_chunk_size]))
+            else:
+                elements[i:] = list(map(tuple, attributes[i:]))
+        el = PlyElement.describe(elements, 'vertex')
+        PlyData([el]).write(path)
+
 
     def save_ply(self, path):
         mkdir_p(os.path.dirname(path))
@@ -608,6 +716,27 @@ class GaussianModel:
 
 
     def prune_anchor(self, mask):
+
+        # update offset_denom
+        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~mask]
+        offset_denom = offset_denom.view([-1, 1])
+        del self.offset_denom
+        self.offset_denom = offset_denom
+
+        offset_gradient_accum = self.offset_gradient_accum.view([-1, self.n_offsets])[~mask]
+        offset_gradient_accum = offset_gradient_accum.view([-1, 1])
+        del self.offset_gradient_accum
+        self.offset_gradient_accum = offset_gradient_accum
+
+        
+        temp_opacity_accum = self.opacity_accum[~mask]
+        del self.opacity_accum
+        self.opacity_accum = temp_opacity_accum
+
+        temp_anchor_demon = self.anchor_demon[~mask]
+        del self.anchor_demon
+        self.anchor_demon = temp_anchor_demon
+
         valid_points_mask = ~mask
 
         optimizable_tensors = self._prune_anchor_optimizer(valid_points_mask)
@@ -899,30 +1028,11 @@ class GaussianModel:
         prune_mask = (self.opacity_accum < min_opacity*self.anchor_demon).squeeze(dim=1)
         anchors_mask = (self.anchor_demon > check_interval*success_threshold).squeeze(dim=1) # [N, 1]
         prune_mask = torch.logical_and(prune_mask, anchors_mask) # [N] 
-        
-        # update offset_denom
-        offset_denom = self.offset_denom.view([-1, self.n_offsets])[~prune_mask]
-        offset_denom = offset_denom.view([-1, 1])
-        del self.offset_denom
-        self.offset_denom = offset_denom
-
-        offset_gradient_accum = self.offset_gradient_accum.view([-1, self.n_offsets])[~prune_mask]
-        offset_gradient_accum = offset_gradient_accum.view([-1, 1])
-        del self.offset_gradient_accum
-        self.offset_gradient_accum = offset_gradient_accum
-        
+                
         # update opacity accum 
         if anchors_mask.sum()>0:
             self.opacity_accum[anchors_mask] = torch.zeros([anchors_mask.sum(), 1], device='cuda').float()
             self.anchor_demon[anchors_mask] = torch.zeros([anchors_mask.sum(), 1], device='cuda').float()
-        
-        temp_opacity_accum = self.opacity_accum[~prune_mask]
-        del self.opacity_accum
-        self.opacity_accum = temp_opacity_accum
-
-        temp_anchor_demon = self.anchor_demon[~prune_mask]
-        del self.anchor_demon
-        self.anchor_demon = temp_anchor_demon
 
         if prune_mask.shape[0]>0:
             self.prune_anchor(prune_mask)

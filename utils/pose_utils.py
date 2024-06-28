@@ -67,6 +67,7 @@ def SE3_exp(tau):
     R = SO3_exp(theta)
     t = V(theta) @ rho
 
+
     T = torch.eye(4, device=device, dtype=dtype)
     T[:3, :3] = R
     T[:3, 3] = t
