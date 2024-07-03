@@ -95,8 +95,8 @@ class OptimizationParams(ParamGroup):
         self.iterations = 40_000
         self.spatial_lr_scale = 7.0
 
-        self.position_lr_init = 0.0
-        self.position_lr_final = 0.0
+        self.position_lr_init = 0.001
+        self.position_lr_final = 0.0001
         self.position_lr_delay_mult = 0.01
         self.position_lr_max_steps = 40_000
         

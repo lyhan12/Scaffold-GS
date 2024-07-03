@@ -101,17 +101,20 @@ class GaussianModel:
         self.spatial_lr_scale = 0
         self.setup_functions()
 
+        self.view_dim = 0
+
         if self.use_feat_bank:
             self.mlp_feature_bank = nn.Sequential(
-                nn.Linear(3+1, feat_dim),
+                nn.Linear(self.view_dim+1, feat_dim),
                 nn.ReLU(True),
                 nn.Linear(feat_dim, 3),
                 nn.Softmax(dim=1)
             ).cuda()
 
+
         self.opacity_dist_dim = 1 if self.add_opacity_dist else 0
         self.mlp_opacity = nn.Sequential(
-            nn.Linear(feat_dim+3+self.opacity_dist_dim, feat_dim),
+            nn.Linear(feat_dim+self.view_dim+self.opacity_dist_dim, feat_dim),
             nn.ReLU(True),
             nn.Linear(feat_dim, n_offsets),
             nn.Tanh()
@@ -120,14 +123,14 @@ class GaussianModel:
         self.add_cov_dist = add_cov_dist
         self.cov_dist_dim = 1 if self.add_cov_dist else 0
         self.mlp_cov = nn.Sequential(
-            nn.Linear(feat_dim+3+self.cov_dist_dim, feat_dim),
+            nn.Linear(feat_dim+self.view_dim+self.cov_dist_dim, feat_dim),
             nn.ReLU(True),
             nn.Linear(feat_dim, 7*self.n_offsets),
         ).cuda()
 
         self.color_dist_dim = 1 if self.add_color_dist else 0
         self.mlp_color = nn.Sequential(
-            nn.Linear(feat_dim+3+self.color_dist_dim+self.appearance_dim, feat_dim),
+            nn.Linear(feat_dim+self.view_dim+self.color_dist_dim+self.appearance_dim, feat_dim),
             nn.ReLU(True),
             nn.Linear(feat_dim, 3*self.n_offsets),
             nn.Sigmoid()
@@ -268,6 +271,9 @@ class GaussianModel:
         pts_w_hom = T_wc@pts_cam_hom
 
         pts_w = pts_w_hom[:3, :].transpose(1,0)
+
+        import ipdb
+        ipdb.set_trace()
 
         # pts_samples = pts_w[::16,:].cuda()
 
@@ -676,7 +682,7 @@ class GaussianModel:
             
         return optimizable_tensors
 
-    def insert_anchor(self, anchors, scale=0.0005):
+    def insert_anchor(self, anchors, scale=0.05):
             new_scaling = torch.ones_like(anchors).repeat([1,2]).float().cuda()*scale
             new_scaling = torch.log(new_scaling)
             new_rotation = torch.zeros([anchors.shape[0], 4]).float().cuda()
@@ -1043,23 +1049,23 @@ class GaussianModel:
         mkdir_p(os.path.dirname(path))
         if mode == 'split':
             self.mlp_opacity.eval()
-            opacity_mlp = torch.jit.trace(self.mlp_opacity, (torch.rand(1, self.feat_dim+3+self.opacity_dist_dim).cuda()))
+            opacity_mlp = torch.jit.trace(self.mlp_opacity, (torch.rand(1, self.feat_dim+self.view_dim+self.opacity_dist_dim).cuda()))
             opacity_mlp.save(os.path.join(path, 'opacity_mlp.pt'))
             self.mlp_opacity.train()
 
             self.mlp_cov.eval()
-            cov_mlp = torch.jit.trace(self.mlp_cov, (torch.rand(1, self.feat_dim+3+self.cov_dist_dim).cuda()))
+            cov_mlp = torch.jit.trace(self.mlp_cov, (torch.rand(1, self.feat_dim+self.view_dim+self.cov_dist_dim).cuda()))
             cov_mlp.save(os.path.join(path, 'cov_mlp.pt'))
             self.mlp_cov.train()
 
             self.mlp_color.eval()
-            color_mlp = torch.jit.trace(self.mlp_color, (torch.rand(1, self.feat_dim+3+self.color_dist_dim+self.appearance_dim).cuda()))
+            color_mlp = torch.jit.trace(self.mlp_color, (torch.rand(1, self.feat_dim+self.view_dim+self.color_dist_dim+self.appearance_dim).cuda()))
             color_mlp.save(os.path.join(path, 'color_mlp.pt'))
             self.mlp_color.train()
 
             if self.use_feat_bank:
                 self.mlp_feature_bank.eval()
-                feature_bank_mlp = torch.jit.trace(self.mlp_feature_bank, (torch.rand(1, 3+1).cuda()))
+                feature_bank_mlp = torch.jit.trace(self.mlp_feature_bank, (torch.rand(1, self.view_dim+1).cuda()))
                 feature_bank_mlp.save(os.path.join(path, 'feature_bank_mlp.pt'))
                 self.mlp_feature_bank.train()
 

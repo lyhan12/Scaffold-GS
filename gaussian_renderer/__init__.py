@@ -70,8 +70,12 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
         feat = feat.squeeze(dim=-1) # [n, c]
 
 
-    cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1) # [N, c+3+1]
-    cat_local_view_wodist = torch.cat([feat, ob_view], dim=1) # [N, c+3]
+    # cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1) # [N, c+3+1]
+    # cat_local_view_wodist = torch.cat([feat, ob_view], dim=1) # [N, c+3]
+
+    cat_local_view = torch.cat([feat, ob_dist], dim=1) # [N, c+3+1]
+    cat_local_view_wodist = feat
+
     if pc.appearance_dim > 0:
         camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * viewpoint_camera.uid
         # camera_indicies = torch.ones_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device) * 10
@@ -214,11 +218,14 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     indices = torch.arange(min_scales.shape[0])
     normal = rotations_mat[indices, :, min_scales]
 
-    view_dir = xyz - viewpoint_camera.camera_center
-    normal   = normal * ((((view_dir * normal).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
+    view_dir = viewpoint_camera.camera_center - xyz
+    # normal   = normal * ((((view_dir * normal).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
 
     R_cw = viewpoint_camera.R.T.clone().detach().cuda().to(torch.float32)
     normal = (R_cw @ normal.transpose(0, 1)).transpose(0, 1)
+
+    # normal[:] = viewpoint_camera.R.clone().detach().cuda()[:,2]
+    # normal[:] = torch.tensor([0, 0, -1])
 
     render_normal, _, _, _, _= rasterizer(
         means3D = xyz,
@@ -231,6 +238,9 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         cov3D_precomp = None,
         theta = viewpoint_camera.cam_rot_delta,
         rho = viewpoint_camera.cam_trans_delta)
+
+    render_normal, _, _, _, _= rasterizer( means3D = xyz, means2D = screenspace_points, shs = None, colors_precomp = normal, opacities = opacity, scales = scaling, rotations = rot, cov3D_precomp = None, theta = viewpoint_camera.cam_rot_delta, rho = viewpoint_camera.cam_trans_delta)
+
 
     render_normal = torch.nn.functional.normalize(render_normal, dim=0)
 

@@ -179,17 +179,18 @@ class Camera(nn.Module):
     def normal(self):
         normal_pil = Image.open(self.normal_path)
         normal = torch.from_numpy(np.array(normal_pil)).permute(2, 0, 1)
-    
 
-        normal = 2.0 * normal - 1.1
-        # normal = normal.permute(1,2,0)
+        normal = normal.float() / 255.0    
 
-        # normal = normal @ torch.diag(
-        #     torch.tensor(
-        #         [1, -1, -1], device=normal.device, dtype=normal.dtype)
-        # )
-        # normal = normal.permute(2,0,1)
-        normal = torch.nn.functional.normalize(normal, dim=0)
+        normal = 2.0 * normal - 1.0
+        normal = normal.permute(1,2,0)
+
+        normal = normal @ torch.tensor(
+                [[0, 0, 1],
+                [0, 1, 0],
+                [1, 0, 0]], device=normal.device, dtype=normal.dtype)
+        normal = normal.permute(2,0,1)
+        normal = torch.nn.functional.normalize(normal, dim=0).cuda()
 
 
         return normal
