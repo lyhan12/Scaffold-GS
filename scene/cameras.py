@@ -146,7 +146,7 @@ class Camera(nn.Module):
         ).squeeze(0)
 
     @property
-    def original_image(self):
+    def image(self):
         image_pil = Image.open(self.image_path)
         image_torch = PILtoTorch(image_pil, (self.image_width, self.image_height))
     

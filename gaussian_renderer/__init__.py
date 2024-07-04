@@ -11,9 +11,12 @@
 import torch
 from einops import repeat
 
+from torchvision import transforms
+
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
 from scene.gaussian_model import GaussianModel
+from scene.cameras import Camera
 
 
 from utils.general_utils import build_rotation
@@ -36,6 +39,156 @@ def draw_gaussians_open3d(points, colors):
 
     return
 
+def visualize_from_viewpoint(pc : GaussianModel, cam : Camera, visible_mask=None):
+
+    depth_scales = pc.get_depth_scale
+
+    if depth_scales is None:
+        depth_scale = 1.0
+    else:
+        depth_scale = depth_scales[cam.uid]
+
+    gs_xyz, gs_color, _, _, _ = generate_neural_gaussians(cam, pc, visible_mask)
+
+
+    depth = cam.depth.cpu()
+    normal = cam.normal.cpu()
+    color = transforms.Resize(depth.shape)(cam.image.cpu())
+
+    
+    # assert depth.shape == normal.shape
+
+    K_depth = cam.K(depth.shape).cpu()
+    H_depth = depth.shape[0]
+    W_depth = depth.shape[1]
+
+    xs = torch.arange(W_depth)
+    ys = torch.arange(H_depth)
+    grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
+    grid_z = torch.ones_like(grid_x)
+    # depth_prior
+
+    rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
+
+    rays = rays * depth
+    rays = rays.reshape(3, -1)
+
+    pts_cam = torch.inverse(K_depth) @ rays
+    pts_cam = pts_cam.reshape(3, H_depth, W_depth)
+
+    grid_w = torch.ones_like(grid_x).float()
+    pts_cam_hom = torch.cat([pts_cam, grid_w.unsqueeze(0)], dim=0)
+    pts_cam_hom = pts_cam_hom.reshape(4, -1)
+    
+
+    T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
+
+    pts_w_hom = T_wc@pts_cam_hom
+
+    pts_w = pts_w_hom[:3, :].transpose(1,0)
+
+    import ipdb
+    ipdb.set_trace()
+
+    # pts_samples = pts_w[::16,:].cuda()
+
+    if True:
+        points = pts_w.numpy()
+        colors = color.permute(1, 2, 0).reshape(-1, 3).numpy()
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        gs_pcd = o3d.geometry.PointCloud()
+        gs_pcd.points = o3d.utility.Vector3dVector(gs_xyz.detach().cpu().numpy())
+        gs_pcd.colors = o3d.utility.Vector3dVector(gs_color.detach().cpu().numpy())
+
+        o3d.visualization.draw_geometries([pcd, gs_pcd])
+
+
+    return
+
+
+
+
+def generate_neural_gaussians_for_visualization(pc : GaussianModel, visible_mask=None, is_training=False):
+    ## view frustum filtering for acceleration    
+    if visible_mask is None:
+        visible_mask = torch.ones(pc.get_anchor.shape[0], dtype=torch.bool, device = pc.get_anchor.device)
+    
+    feat = pc._anchor_feat[visible_mask]
+    anchor = pc.get_anchor[visible_mask]
+    grid_offsets = pc._offset[visible_mask]
+    grid_scaling = pc.get_scaling[visible_mask]
+
+    # dist
+    ob_dist = 2.0 * torch.ones([anchor.shape[0], 1], dtype=torch.float, device = anchor.device)
+
+    cat_local_view = torch.cat([feat, ob_dist], dim=1) # [N, c+3+1]
+    cat_local_view_wodist = feat
+
+    if pc.appearance_dim > 0:
+        camera_indices = torch.zeros_like(cat_local_view[:,0], dtype=torch.long, device=ob_dist.device)
+        appearance = pc.get_appearance(camera_indices)
+
+    # get offset's opacity
+    if pc.add_opacity_dist:
+        neural_opacity = pc.get_opacity_mlp(cat_local_view) # [N, k]
+    else:
+        neural_opacity = pc.get_opacity_mlp(cat_local_view_wodist)
+
+    # opacity mask generation
+    neural_opacity = neural_opacity.reshape([-1, 1])
+    mask = (neural_opacity>0.0)
+    mask = mask.view(-1)
+
+    # select opacity 
+    opacity = neural_opacity[mask]
+
+    # get offset's color
+    if pc.appearance_dim > 0:
+        if pc.add_color_dist:
+            color = pc.get_color_mlp(torch.cat([cat_local_view, appearance], dim=1))
+        else:
+            color = pc.get_color_mlp(torch.cat([cat_local_view_wodist, appearance], dim=1))
+    else:
+        if pc.add_color_dist:
+            color = pc.get_color_mlp(cat_local_view)
+        else:
+            color = pc.get_color_mlp(cat_local_view_wodist)
+    color = color.reshape([anchor.shape[0]*pc.n_offsets, 3])# [mask]
+
+    # get offset's cov
+    if pc.add_cov_dist:
+        scale_rot = pc.get_cov_mlp(cat_local_view)
+    else:
+        scale_rot = pc.get_cov_mlp(cat_local_view_wodist)
+    scale_rot = scale_rot.reshape([anchor.shape[0]*pc.n_offsets, 7]) # [mask]
+    
+    # offsets
+    offsets = grid_offsets.view([-1, 3]) # [mask]
+    
+    # combine for parallel masking
+    concatenated = torch.cat([grid_scaling, anchor], dim=-1)
+    concatenated_repeated = repeat(concatenated, 'n (c) -> (n k) (c)', k=pc.n_offsets)
+    concatenated_all = torch.cat([concatenated_repeated, color, scale_rot, offsets], dim=-1)
+    masked = concatenated_all[mask]
+    scaling_repeat, repeat_anchor, color, scale_rot, offsets = masked.split([6, 3, 3, 7, 3], dim=-1)
+    
+    # post-process cov
+    scaling = scaling_repeat[:,3:] * torch.sigmoid(scale_rot[:,:3]) # * (1+torch.sigmoid(repeat_dist))
+    rot = pc.rotation_activation(scale_rot[:,3:7])
+    
+    # post-process offsets to get centers for gaussians
+    offsets = offsets * scaling_repeat[:,:3]
+    xyz = repeat_anchor + offsets
+
+
+    if is_training:
+        return xyz, color, opacity, scaling, rot, neural_opacity, mask
+    else:
+        return xyz, color, opacity, scaling, rot
 
 
 
@@ -215,14 +368,18 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
 
     rotations_mat = build_rotation(rot)
     min_scales = torch.argmin(scaling, dim=1)
-    indices = torch.arange(min_scales.shape[0])
-    normal = rotations_mat[indices, :, min_scales]
+    max_scales = torch.argmax(scaling, dim=1)
+    min_indices = torch.arange(min_scales.shape[0])
+    max_indices = torch.arange(max_scales.shape[0])
+    normal = rotations_mat[min_indices, :, min_scales]
+    edge = rotations_mat[max_indices, :, max_scales]
 
     view_dir = viewpoint_camera.camera_center - xyz
     # normal   = normal * ((((view_dir * normal).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
 
     R_cw = viewpoint_camera.R.T.clone().detach().cuda().to(torch.float32)
     normal = (R_cw @ normal.transpose(0, 1)).transpose(0, 1)
+    edge = (R_cw @ edge.transpose(0, 1)).transpose(0, 1)
 
     # normal[:] = viewpoint_camera.R.clone().detach().cuda()[:,2]
     # normal[:] = torch.tensor([0, 0, -1])
@@ -239,10 +396,22 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         theta = viewpoint_camera.cam_rot_delta,
         rho = viewpoint_camera.cam_trans_delta)
 
-    render_normal, _, _, _, _= rasterizer( means3D = xyz, means2D = screenspace_points, shs = None, colors_precomp = normal, opacities = opacity, scales = scaling, rotations = rot, cov3D_precomp = None, theta = viewpoint_camera.cam_rot_delta, rho = viewpoint_camera.cam_trans_delta)
+    render_edge, _, _, _, _= rasterizer(
+        means3D = xyz,
+        means2D = screenspace_points,
+        shs = None,
+        colors_precomp = edge,
+        opacities = opacity,
+        scales = scaling,
+        rotations = rot,
+        cov3D_precomp = None,
+        theta = viewpoint_camera.cam_rot_delta,
+        rho = viewpoint_camera.cam_trans_delta)
+
 
 
     render_normal = torch.nn.functional.normalize(render_normal, dim=0)
+    render_edge = torch.nn.functional.normalize(render_edge, dim=0)
 
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
@@ -269,6 +438,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 "scaling": scaling,
                 "depth": render_depth,
                 "normal": render_normal,
+                "edge": render_edge,
                 "opacity": render_opacity,
                 "n_touched": n_touched,
                 }
@@ -279,6 +449,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 "radii": radii,
                 "depth": render_depth,
                 "normal": render_normal,
+                "edge": render_edge,
                 "opacity": render_opacity,
                 "n_touched": n_touched,
                 }

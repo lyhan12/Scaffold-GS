@@ -63,6 +63,7 @@ class GaussianModel:
                  add_opacity_dist : bool = False,
                  add_cov_dist : bool = False,
                  add_color_dist : bool = False,
+                 use_depth_scale : bool = False
                  ):
 
         self.feat_dim = feat_dim
@@ -73,8 +74,10 @@ class GaussianModel:
         self.update_hierachy_factor = update_hierachy_factor
         self.use_feat_bank = use_feat_bank
 
+        self.use_depth_scale = use_depth_scale
         self.appearance_dim = appearance_dim
         self.embedding_appearance = None
+        self.depth_scale = None
         self.ratio = ratio
         self.add_opacity_dist = add_opacity_dist
         self.add_cov_dist = add_cov_dist
@@ -187,6 +190,15 @@ class GaussianModel:
     def get_appearance(self):
         return self.embedding_appearance
 
+    def set_depth_scale(self, num_cameras):
+        if self.use_depth_scale:
+            self.depth_scale = nn.Parameter(torch.ones(num_cameras, device="cuda"))
+
+    @property
+    def get_depth_scale(self):
+        return self.depth_scale
+
+
     @property
     def get_scaling(self):
         return 1.0*self.scaling_activation(self._scaling)
@@ -235,11 +247,19 @@ class GaussianModel:
         
         return data
 
-    def create_from_depth(self, cam):
+
+    def create_from_depth(self, cam, depth_scale=None):
+        
+        if depth_scale is None:
+            depth_scale = torch.tensor(1.0, device="cpu")
+        else:
+            depth_scale = depth_scale.cpu()
+
+
 
         depth = cam.depth.cpu()
         normal = cam.normal.cpu()
-        color = transforms.Resize(depth.shape)(cam.original_image.cpu())
+        color = transforms.Resize(depth.shape)(cam.image.cpu())
 
         
         # assert depth.shape == normal.shape
@@ -255,6 +275,9 @@ class GaussianModel:
         # depth_prior
 
         rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
+
+        import ipdb
+        ipdb.set_trace()
         rays = rays * depth
         rays = rays.reshape(3, -1)
 
@@ -271,9 +294,6 @@ class GaussianModel:
         pts_w_hom = T_wc@pts_cam_hom
 
         pts_w = pts_w_hom[:3, :].transpose(1,0)
-
-        import ipdb
-        ipdb.set_trace()
 
         # pts_samples = pts_w[::16,:].cuda()
 
@@ -342,49 +362,33 @@ class GaussianModel:
         print("Position_LR_Init:", training_args.position_lr_init)
         print("Offset_LR_Init:", training_args.offset_lr_init)
 
+        l = [
+            {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
+            {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
+            {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
+            {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
+            {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+
+            {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
+            {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
+            {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
+        ]
         
         
         if self.use_feat_bank:
-            l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
-                {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
-                {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-                {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-                {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-                
-                {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
+            l += [
                 {'params': self.mlp_feature_bank.parameters(), 'lr': training_args.mlp_featurebank_lr_init, "name": "mlp_featurebank"},
-                {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
-                {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
                 {'params': self.embedding_appearance.parameters(), 'lr': training_args.appearance_lr_init, "name": "embedding_appearance"},
             ]
         elif self.appearance_dim > 0:
-            l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
-                {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
-                {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-                {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-                {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
-
-                {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
-                {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
-                {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
+            l += [
                 {'params': self.embedding_appearance.parameters(), 'lr': training_args.appearance_lr_init, "name": "embedding_appearance"},
             ]
-        else:
-            l = [
-                {'params': [self._anchor], 'lr': training_args.position_lr_init * training_args.spatial_lr_scale, "name": "anchor"},
-                {'params': [self._offset], 'lr': training_args.offset_lr_init * training_args.spatial_lr_scale, "name": "offset"},
-                {'params': [self._anchor_feat], 'lr': training_args.feature_lr, "name": "anchor_feat"},
-                {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
-                {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-                {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
 
-                {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
-                {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
-                {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
+        if self.use_depth_scale:
+            l += [
+                {'params': [self.depth_scale], 'lr': training_args.depth_scale_lr_init, "name": "depth_scale"},
             ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -422,6 +426,12 @@ class GaussianModel:
                                                         lr_delay_mult=training_args.appearance_lr_delay_mult,
                                                         max_steps=training_args.appearance_lr_max_steps)
 
+        if self.use_depth_scale:
+            self.depth_scale_scheduler_args = get_expon_lr_func(lr_init=training_args.depth_scale_lr_init,
+                                                        lr_final=training_args.depth_scale_lr_final,
+                                                        lr_delay_mult=training_args.depth_scale_lr_delay_mult,
+                                                        max_steps=training_args.depth_scale_lr_max_steps)
+
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
@@ -446,6 +456,10 @@ class GaussianModel:
             if self.appearance_dim > 0 and param_group["name"] == "embedding_appearance":
                 lr = self.appearance_scheduler_args(iteration)
                 param_group['lr'] = lr
+            if self.use_depth_scale and param_group["name"] == "depth_scale":
+                lr = self.depth_scale_scheduler_args(iteration)
+                param_group['lr'] = lr
+
             
             
     def construct_list_of_attributes(self):
@@ -600,7 +614,8 @@ class GaussianModel:
             if  'mlp' in group['name'] or \
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
-                'embedding' in group['name']:
+                'embedding' in group['name'] or \
+                'depth_scale' in group['name']:
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
@@ -653,7 +668,8 @@ class GaussianModel:
             if  'mlp' in group['name'] or \
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
-                'embedding' in group['name']:
+                'embedding' in group['name'] or \
+                'depth_scale' in group['name']:
                 continue
 
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -922,92 +938,6 @@ class GaussianModel:
                                            dtype=torch.int32, 
                                            device=self.offset_gradient_accum.device)
         self.offset_gradient_accum = torch.cat([self.offset_gradient_accum, padding_offset_gradient_accum], dim=0)
-
-    def add_anchor_from_depth(self, camera, depth, mask):
-        depth = depth.cpu()
-        mask = mask.cpu()
-
-        W = camera.image_width
-        H = camera.image_height
-        fx = fov2focal(camera.FoVx, W)
-        fy = fov2focal(camera.FoVy, H)
-        cx = .5 * W
-        cy = .5 * H
-
-        K = torch.tensor([ [fx, 0, cx], [0, fy, cy], [0, 0, 1] ], dtype=torch.float32)
-        
-        xs = torch.arange(W)
-        ys = torch.arange(H)
-        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
-        grid_z = torch.ones_like(grid_x)
-        # depth_prior
-
-        rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
-        rays = rays * depth
-        rays = rays.reshape(3, -1)
-
-        import numpy as np
-        import matplotlib.pyplot as plt
-
-        mask_np = mask.squeeze().numpy()
-        depth_np = depth.numpy()
-
-
-        # # Create subplots
-        # fig, axs = plt.subplots(1, 2, figsize=(12, 6))
-
-        # # Plot the mask image
-        # mask_img = axs[0].imshow(mask_np, cmap='gray')
-        # axs[0].set_title("Mask Image")
-        # axs[0].axis('off')
-        # fig.colorbar(mask_img, ax=axs[0], orientation='vertical')
-
-        # # Plot the depth image
-        # depth_img = axs[1].imshow(depth_np, cmap='turbo')
-        # axs[1].set_title("Depth Image")
-        # axs[1].axis('off')
-        # fig.colorbar(depth_img, ax=axs[1], orientation='vertical')
-
-        # plt.show()
-
-        pts_cam = torch.inverse(K) @ rays
-        pts_cam = pts_cam.reshape(3, H, W)
-
-        grid_w = torch.ones_like(grid_x).float()
-        pts_cam_hom = torch.cat([pts_cam, grid_w.unsqueeze(0)], dim=0)
-        pts_cam_hom = pts_cam_hom.reshape(4, -1)
-        
-
-        T_wc = torch.inverse(camera.world_view_transform.transpose(0,1)).cpu()
-
-        pts_w_hom = T_wc@pts_cam_hom
-
-        pts_w = pts_w_hom[:3, :].transpose(1,0)
-
-        pts_samples = pts_w[::16,:].cuda()
-
-        self.insert_anchor(pts_samples)
-        self.pad_zero_to_data()
-
-        if True:
-            points = pts_cam.reshape(3, -1)
-            colors = camera.original_image.reshape(3, -1).cpu()
-
-            import open3d as o3d
-            points_np = points.numpy().T  # Shape will be (1333603, 3)
-            colors_np = colors.numpy().T  # Shape will be (1333603, 3)
-
-            # Create an Open3D point cloud object
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points_np)
-            pcd.colors = o3d.utility.Vector3dVector(colors_np)
-
-            # Visualize the point cloud
-            o3d.visualization.draw_geometries([pcd])
-
-        import ipdb
-        ipdb.set_trace()
-
 
     def adjust_anchor(self, check_interval=100, success_threshold=0.8, grad_threshold=0.0002, min_opacity=0.005):
         # update offset_denom
