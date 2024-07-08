@@ -17,6 +17,8 @@ from utils.graphics_utils import getWorld2View2, getProjectionMatrix, getWorld2V
 from utils.general_utils import PILtoTorch, NP_resize
 from PIL import Image
 
+from utils.pose_utils import update_pose
+
 class Camera(nn.Module):
     def __init__(self, colmap_id, R_gt, T_gt, resolution, FoVx, FoVy, image_path, depth_path, normal_path,
                  image_name, uid,
@@ -27,12 +29,13 @@ class Camera(nn.Module):
         self.uid = uid
         self.colmap_id = colmap_id
 
-        self.R_gt = R_gt.copy()
-        self.T_gt = T_gt.copy()
+        self.R_gt = torch.tensor(R_gt.copy(), device=device)
+        self.T_gt = torch.tensor(T_gt.copy(), device=device)
 
+        self.R_init = torch.tensor(R_gt.copy(), device=device)
+        self.T_init = torch.tensor(T_gt.copy(), device=device)
 
-        R = self.R_gt
-        T = self.T_gt
+        # self.T_init += torch.tensor([0.1, -0.1, 0.1]).cuda()
 
 
         # # Generate a random vector
@@ -47,9 +50,6 @@ class Camera(nn.Module):
         # T = T + np.array([-0.05, 0.05, 0.05])
 
 
-        self.R_init = R
-        self.T_init = T
-
         self.FoVx = FoVx
         self.FoVy = FoVy
         self.image_name = image_name
@@ -58,13 +58,6 @@ class Camera(nn.Module):
         self.normal_path = normal_path
         self.resolution_scale = 1.0
 
-
-        self.cam_rot_delta = nn.Parameter(
-            torch.zeros(3, requires_grad=True, device=device)
-        )
-        self.cam_trans_delta = nn.Parameter(
-            torch.zeros(3, requires_grad=True, device=device)
-        )
 
         try:
             self.device = torch.device(device)
@@ -82,8 +75,8 @@ class Camera(nn.Module):
         self.trans = trans
         self.scale = scale
 
-        self.R = torch.tensor(R).to(device)
-        self.T = torch.tensor(T).to(device)
+        self.R = self.R_init.clone()
+        self.T = self.T_init.clone()
 
         # self.world_view_transform = torch.tensor(getWorld2View2(R_gt, T_gt, trans, scale)).transpose(0, 1).cuda()
         self.projection_matrix = getProjectionMatrix(znear=self.znear, zfar=self.zfar, fovX=self.FoVx, fovY=self.FoVy).transpose(0,1).cuda()
@@ -122,19 +115,22 @@ class Camera(nn.Module):
 
 
 
-    def update_RT(self, R, t):
-        self.R = R.to(device=self.device)
-        self.T = t.to(device=self.device)
+    def set_delta_RT(self, cam_rot_delta, cam_trans_delta):
+        R, T = update_pose(self.R_init, self.T_init, cam_rot_delta, cam_trans_delta)
+        self.R = R
+        self.T = T
 
+
+    # camera.cam_rot_delta.data.fill_(0)
+    # camera.cam_trans_delta.data.fill_(0)
 
 
         print("GT R:", self.R_gt)
-        print("EST R:", self.R.detach())
         print("INIT R:", self.R_init)
+        print("CUR R:", self.R)
         print("GT T:", self.T_gt)
-        print("EST T:", self.T.detach())
         print("INIT T:", self.T_init)
-        print(f"T Error: {np.linalg.norm(self.T.detach().cpu().numpy() - self.T_gt)} (cur) / {np.linalg.norm(self.T_init - self.T_gt)} (init)")
+        print("CUR T:", self.T)
 
 
     @property

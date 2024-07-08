@@ -112,7 +112,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         image = Image.open(image_path)
 
         depth_path = os.path.join(os.path.dirname(images_folder), 'depths', image_name+'.npy')
-        normal_path = os.path.join(os.path.dirname(images_folder), 'normals', image_name+'.png')
+        normal_path = os.path.join(os.path.dirname(images_folder), 'normals', image_name+'.JPG')
 
         # print(f'image: {image.size}')
 

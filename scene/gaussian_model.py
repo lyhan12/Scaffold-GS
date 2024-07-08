@@ -29,6 +29,8 @@ from torchvision import transforms
 import open3d as o3d
 from utils.sh_utils import RGB2SH
 
+from utils.pcd_utils import get_o3d_pcd_from_images
+
     
 class GaussianModel:
 
@@ -63,7 +65,8 @@ class GaussianModel:
                  add_opacity_dist : bool = False,
                  add_cov_dist : bool = False,
                  add_color_dist : bool = False,
-                 use_depth_scale : bool = False
+                 use_depth_scale : bool = False,
+                 use_pose_update : bool = False,
                  ):
 
         self.feat_dim = feat_dim
@@ -82,6 +85,10 @@ class GaussianModel:
         self.add_opacity_dist = add_opacity_dist
         self.add_cov_dist = add_cov_dist
         self.add_color_dist = add_color_dist
+
+        self.use_pose_update = use_pose_update
+        self.cam_rot_delta = torch.empty(0)
+        self.cam_trans_delta = torch.empty(0)
 
         self._anchor = torch.empty(0)
         self._offset = torch.empty(0)
@@ -196,7 +203,22 @@ class GaussianModel:
 
     @property
     def get_depth_scale(self):
-        return self.depth_scale
+        if self.use_depth_scale:
+            return self.depth_scale
+        else:
+            return torch.tensor(1.0, device="cuda")
+
+    def set_pose_parameter(self, num_cameras):
+        if self.use_pose_update:
+            self.cam_rot_delta = nn.Parameter(torch.zeros(num_cameras, 3, device="cuda"))
+            self.cam_trans_delta = nn.Parameter(torch.zeros(num_cameras, 3, device="cuda"))
+
+    @property
+    def get_pose_parameter(self):
+        return self.cam_rot_delta, self.cam_trans_delta
+
+
+
 
 
     @property
@@ -248,7 +270,7 @@ class GaussianModel:
         return data
 
 
-    def create_from_depth(self, cam, depth_scale=None):
+    def create_from_depth(self, cam, depth_scale=None, voxel_size=None):
         
         if depth_scale is None:
             depth_scale = torch.tensor(1.0, device="cpu")
@@ -257,57 +279,26 @@ class GaussianModel:
 
 
 
+
         depth = cam.depth.cpu()
         normal = cam.normal.cpu()
         color = transforms.Resize(depth.shape)(cam.image.cpu())
 
-        
-        # assert depth.shape == normal.shape
-
         K_depth = cam.K(depth.shape).cpu()
-        H_depth = depth.shape[0]
-        W_depth = depth.shape[1]
+        T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
 
-        xs = torch.arange(W_depth)
-        ys = torch.arange(H_depth)
-        grid_x, grid_y = torch.meshgrid(xs, ys, indexing="xy")
-        grid_z = torch.ones_like(grid_x)
-        # depth_prior
+        pcd = get_o3d_pcd_from_images(K_depth, depth, color, normal, depth_scale, T_wc) 
 
-        rays = torch.cat([grid_x.unsqueeze(0), grid_y.unsqueeze(0), grid_z.unsqueeze(0)], dim=0).float()
+        if voxel_size is not None:
+          pcd = pcd.voxel_down_sample(0.05)
+
+        anchors = torch.from_numpy(np.asarray(pcd.points)).clone().cuda()
 
         import ipdb
         ipdb.set_trace()
-        rays = rays * depth
-        rays = rays.reshape(3, -1)
 
-        pts_cam = torch.inverse(K_depth) @ rays
-        pts_cam = pts_cam.reshape(3, H_depth, W_depth)
-
-        grid_w = torch.ones_like(grid_x).float()
-        pts_cam_hom = torch.cat([pts_cam, grid_w.unsqueeze(0)], dim=0)
-        pts_cam_hom = pts_cam_hom.reshape(4, -1)
-        
-
-        T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
-
-        pts_w_hom = T_wc@pts_cam_hom
-
-        pts_w = pts_w_hom[:3, :].transpose(1,0)
-
-        # pts_samples = pts_w[::16,:].cuda()
-
-        self.insert_anchor(pts_w.cuda())
+        self.insert_anchor(anchors)
         self.pad_zero_to_data()
-
-
-        if False:
-            points = pts_w.numpy()
-            colors = color.permute(1, 2, 0).reshape(-1, 3).numpy()
-
-            pcd = o3d.geometry.PointCloud()
-            pcd.points = o3d.utility.Vector3dVector(points)
-            pcd.colors = o3d.utility.Vector3dVector(colors)
 
         return
 
@@ -391,6 +382,13 @@ class GaussianModel:
                 {'params': [self.depth_scale], 'lr': training_args.depth_scale_lr_init, "name": "depth_scale"},
             ]
 
+        if self.use_pose_update:
+            l += [
+                    {'params': [self.cam_rot_delta], 'lr': training_args.rot_lr_init, "name": "cam_rot_delta"},
+                    {'params': [self.cam_trans_delta], 'lr': training_args.trans_lr_init, "name": "cam_trans_delta"},
+            ]
+
+
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.anchor_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*training_args.spatial_lr_scale,
                                                     lr_final=training_args.position_lr_final*training_args.spatial_lr_scale,
@@ -432,6 +430,17 @@ class GaussianModel:
                                                         lr_delay_mult=training_args.depth_scale_lr_delay_mult,
                                                         max_steps=training_args.depth_scale_lr_max_steps)
 
+        if self.use_pose_update:
+            self.rot_scheduler_args = get_expon_lr_func(lr_init=training_args.rot_lr_init,
+                                                        lr_final=training_args.rot_lr_final,
+                                                        lr_delay_mult=training_args.rot_lr_delay_mult,
+                                                        max_steps=training_args.rot_lr_max_steps)
+            self.trans_scheduler_args = get_expon_lr_func(lr_init=training_args.trans_lr_init,
+                                                        lr_final=training_args.trans_lr_final,
+                                                        lr_delay_mult=training_args.trans_lr_delay_mult,
+                                                        max_steps=training_args.trans_lr_max_steps)
+
+
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
         for param_group in self.optimizer.param_groups:
@@ -459,6 +468,14 @@ class GaussianModel:
             if self.use_depth_scale and param_group["name"] == "depth_scale":
                 lr = self.depth_scale_scheduler_args(iteration)
                 param_group['lr'] = lr
+            if self.use_pose_update and param_group["name"] == "cam_rot_delta":
+                lr = self.rot_scheduler_args(iteration)
+                param_group['lr'] = lr
+            if self.use_pose_update and param_group["name"] == "cam_trans_delta":
+                lr = self.trans_scheduler_args(iteration)
+                param_group['lr'] = lr
+
+
 
             
             
@@ -615,7 +632,9 @@ class GaussianModel:
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
                 'embedding' in group['name'] or \
-                'depth_scale' in group['name']:
+                'depth_scale' in group['name'] or \
+                'cam_rot_delta' in group['name'] or \
+                'cam_trans_delta' in group['name']:
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
@@ -669,7 +688,10 @@ class GaussianModel:
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
                 'embedding' in group['name'] or \
-                'depth_scale' in group['name']:
+                'depth_scale' in group['name'] or \
+                'cam_rot_delta' in group['name'] or \
+                'cam_trans_delta' in group['name']:
+
                 continue
 
             stored_state = self.optimizer.state.get(group['params'][0], None)

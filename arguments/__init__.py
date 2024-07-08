@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         self.lod = 0
 
         self.use_depth_scale = False
+        self.use_pose_update = False
 
         self.appearance_dim = 32
         self.lowpoly = False
@@ -142,6 +143,24 @@ class OptimizationParams(ParamGroup):
         self.depth_scale_lr_final = 0.00005
         self.depth_scale_lr_delay_mult = 0.01
         self.depth_scale_lr_max_steps = 40_000
+
+        self.rot_lr_init = 0.0003
+        self.rot_lr_final = 0.0001
+        self.rot_lr_delay_mult = 0.01
+        self.rot_lr_max_steps = 40_000
+
+        self.trans_lr_init = 0.0003
+        self.trans_lr_final = 0.0001
+        self.trans_lr_delay_mult = 0.01
+        self.trans_lr_max_steps = 40_000
+
+
+
+        self.depth_affine_coefficient_lr_init = 0.005
+        self.depth_affine_coefficient_lr_final = 0.00005
+        self.depth_affine_coefficient_lr_delay_mult = 0.01
+        self.depth_affine_coefficient_lr_max_steps = 40_000
+
 
 
         self.percent_dense = 0.01
