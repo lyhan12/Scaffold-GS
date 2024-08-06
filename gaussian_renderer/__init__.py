@@ -352,11 +352,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        projmatrix_raw=viewpoint_camera.projection_matrix,
         sh_degree=1,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=pipe.debug
+        debug=pipe.debug,
+        kernel_size=0.0,
+        require_depth=True,
+        require_coord=False
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)
@@ -368,59 +370,11 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
     else:
         cam_rot_delta = torch.zeros(3, device="cuda")
         cam_trans_delta = torch.zeros(3, device="cuda")
-
-    if render_normal or render_edge:
-
-        rotations_mat = build_rotation(rot)
-        min_scales = torch.argmin(scaling, dim=1)
-        max_scales = torch.argmax(scaling, dim=1)
-        min_indices = torch.arange(min_scales.shape[0])
-        max_indices = torch.arange(max_scales.shape[0])
-        normal = rotations_mat[min_indices, :, min_scales]
-        edge = rotations_mat[max_indices, :, max_scales]
-
-        view_dir = viewpoint_camera.camera_center - xyz
-        # normal   = normal * ((((view_dir * normal).sum(dim=-1) < 0) * 1 - 0.5) * 2)[...,None]
-
-        R_cw = viewpoint_camera.R.T.clone().detach().cuda().to(torch.float32)
-        normal = (R_cw @ normal.transpose(0, 1)).transpose(0, 1)
-        edge = (R_cw @ edge.transpose(0, 1)).transpose(0, 1)
-
-        # normal[:] = viewpoint_camera.R.clone().detach().cuda()[:,2]
-        # normal[:] = torch.tensor([0, 0, -1])
-
-        if render_normal:
-            normal_image, _, _, _, _= rasterizer(
-                means3D = xyz,
-                means2D = screenspace_points,
-                shs = None,
-                colors_precomp = normal,
-                opacities = opacity,
-                scales = scaling,
-                rotations = rot,
-                cov3D_precomp = None,
-                theta = cam_rot_delta,
-                rho = cam_trans_delta)
-            normal_image = torch.nn.functional.normalize(normal_image, dim=0)
-
-        if render_edge:
-            edge_image, _, _, _, _= rasterizer(
-                means3D = xyz,
-                means2D = screenspace_points,
-                shs = None,
-                colors_precomp = edge,
-                opacities = opacity,
-                scales = scaling,
-                rotations = rot,
-                cov3D_precomp = None,
-                theta = cam_rot_delta,
-                rho = cam_trans_delta)
-
-            edge_image = torch.nn.functional.normalize(edge_image, dim=0)
-
     
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
-    color_image, radii, depth_image, opacity_image, n_touched  = rasterizer(
+
+
+    color_image, radii, coord, mcoord, depth_image, middepth_image, opacity_image, normal_image = rasterizer(
         means3D = xyz,
         means2D = screenspace_points,
         shs = None,
@@ -428,30 +382,7 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
         opacities = opacity,
         scales = scaling,
         rotations = rot,
-        cov3D_precomp = None,
-        theta = cam_rot_delta,
-        rho = cam_trans_delta)
-
-    if render_density:
-        touch_mask = n_touched >= 1
-
-        cur_xyz = xyz[touch_mask].clone()
-        cur_color = color[touch_mask].clone()
-        cur_opacity = opacity[touch_mask].clone() / n_touched[touch_mask].unsqueeze(1)
-        cur_scaling = scaling[touch_mask].clone()
-        cur_rot = rot[touch_mask].clone()
-    
-        _, _, _, opacity_density_image, _ = rasterizer(
-            means3D = cur_xyz,
-            means2D = screenspace_points,
-            shs = None,
-            colors_precomp = cur_color,
-            opacities = cur_opacity,
-            scales = cur_scaling,
-            rotations = cur_rot,
-            cov3D_precomp = None,
-            theta = cam_rot_delta,
-            rho = cam_trans_delta)
+        cov3D_precomp = None)
 
     result = {"render": color_image,
                 "viewspace_points": screenspace_points,
@@ -460,19 +391,13 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 "scaling": scaling,
                 "opacity": opacity_image,
                 "depth": depth_image,
-                "n_touched": n_touched,
+                # "depth_var": depth_var_image,
+                "normal": normal_image,
                 }
 
     if is_training:
         result["neural_opacity"] = neural_opacity
         result["selection_mask"] = mask
-
-    if render_edge:
-        result["edge"] = edge_image 
-    if render_normal:
-        result["normal"] = normal_image 
-    if render_density:
-        result["opacity_density"] = opacity_density_image 
 
     return result
 
@@ -504,11 +429,13 @@ def prefilter_voxel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch
         scale_modifier=scaling_modifier,
         viewmatrix=viewpoint_camera.world_view_transform,
         projmatrix=viewpoint_camera.full_proj_transform,
-        projmatrix_raw=viewpoint_camera.projection_matrix,
         sh_degree=1,
         campos=viewpoint_camera.camera_center,
         prefiltered=False,
-        debug=pipe.debug
+        debug=pipe.debug,
+        kernel_size=0.0,
+        require_depth=True,
+        require_coord=False
     )
 
     rasterizer = GaussianRasterizer(raster_settings=raster_settings)

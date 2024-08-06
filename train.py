@@ -209,9 +209,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    init_mono = False
+    use_mono_init = True
 
-    if init_mono:
+    if use_mono_init:
         mask = torch.ones(gaussians.get_anchor.shape[0]).bool().cuda()
         with torch.no_grad():
             gaussians.prune_anchor(mask)
@@ -317,10 +317,10 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         scaling = render_pkg["scaling"]
         opacity = render_pkg["neural_opacity"]
         depth = render_pkg["depth"]
+        # depth_var = render_pkg["depth_var"]
         normal = render_pkg["normal"]
         # edge = render_pkg["edge"]
         opacity_image = render_pkg["opacity"]
-        n_touched = render_pkg["n_touched"]
 
 
         gt_image = viewpoint_cam.image.cuda()
@@ -363,7 +363,6 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
             depth_loss_pearson = pearson_depth_loss(depth.squeeze(0)[mask], depth_gt[mask])
             if gaussians.use_depth_scale:
                 depth_loss_l1 = l1_log_loss(depth, depth_gt)
-            # pearson_loss_local = local_pearson_loss(depth.squeeze(0), depth_gt, 100, 1.0)
 
             # normal_loss = mean_angular_error(
             #     pred=normal,
@@ -376,7 +375,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
             normal_mono_loss = torch.abs(normal_gt[:,mask] - normal[:,mask]).mean()
             # edge_mono_loss = torch.abs(normal_gt[:,mask] * edge[:,mask]).mean()
-            normal_surf_loss = torch.abs(normal_surf[:,mask] - normal[:,mask]).mean()
+            # normal_surf_loss = torch.abs(normal_surf[:,mask] - normal[:,mask]).mean()
 
         flattening_loss = torch.min(scaling, dim=1, keepdim=True)[0].mean()
         flattening_loss2 = (torch.min(scaling, dim=1, keepdim=True)[0] * torch.median(scaling, dim=1, keepdim=True)[0]).mean()
