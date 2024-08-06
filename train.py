@@ -35,7 +35,7 @@ import torchvision.transforms.functional as tf
 # from lpipsPyTorch import lpips
 import lpips
 from random import randint
-from utils.loss_utils import l1_loss, ssim, local_pearson_loss, pearson_depth_loss, pearson_depth_transform
+from utils.loss_utils import l1_loss, ssim, local_pearson_loss, pearson_depth_loss, pearson_depth_transform, l1_log_loss
 from gaussian_renderer import generate_neural_gaussians_for_visualization, prefilter_voxel, render, network_gui, generate_neural_gaussians, visualize_from_viewpoint
 import sys
 from scene import Scene, GaussianModel
@@ -362,7 +362,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
             depth_loss_pearson = pearson_depth_loss(depth.squeeze(0)[mask], depth_gt[mask])
             if gaussians.use_depth_scale:
-                depth_loss_l1 = l1_loss(depth, depth_gt)
+                depth_loss_l1 = l1_log_loss(depth, depth_gt)
             # pearson_loss_local = local_pearson_loss(depth.squeeze(0), depth_gt, 100, 1.0)
 
             # normal_loss = mean_angular_error(
