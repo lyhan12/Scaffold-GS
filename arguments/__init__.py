@@ -67,7 +67,7 @@ class ModelParams(ParamGroup):
         self.use_depth_scale = False
         self.use_pose_update = False
 
-        self.appearance_dim = 32
+        self.appearance_dim = 0
         self.lowpoly = False
         self.ds = 1
         self.ratio = 1 # sampling the input point cloud
@@ -78,6 +78,8 @@ class ModelParams(ParamGroup):
         self.add_opacity_dist = False
         self.add_cov_dist = False
         self.add_color_dist = False
+
+        self.use_decoupled_appearance = False
         
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -154,6 +156,9 @@ class OptimizationParams(ParamGroup):
         self.trans_lr_delay_mult = 0.01
         self.trans_lr_max_steps = 40_000
 
+
+        self.appearance_embeddings_lr = 0.001
+        self.appearance_network_lr = 0.001
 
 
         self.depth_affine_coefficient_lr_init = 0.005

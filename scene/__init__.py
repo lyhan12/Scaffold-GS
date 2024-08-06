@@ -92,7 +92,7 @@ class Scene:
             self.gaussians.load_ply_sparse_gaussian(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter),
-                                                           "point_cloud.ply"))
+                                                           "point_cloud_scaffoldgs.ply"))
             self.gaussians.load_mlp_checkpoints(os.path.join(self.model_path,
                                                            "point_cloud",
                                                            "iteration_" + str(self.loaded_iter)))
@@ -101,7 +101,7 @@ class Scene:
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
-        # self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud_scaffoldgs.ply"))
         self.gaussians.save_mlp_checkpoints(point_cloud_path)
 
     def getTrainCameras(self, scale=1.0):

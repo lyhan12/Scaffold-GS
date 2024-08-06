@@ -23,6 +23,8 @@ from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
 from utils.graphics_utils import fov2focal
 
+from scene.appearance_network import AppearanceNetwork
+
 from scene.embedding import Embedding
 
 from torchvision import transforms
@@ -147,6 +149,15 @@ class GaussianModel:
         ).cuda()
 
 
+        # appearance network and appearance embedding
+        # this module is adopted from GOF
+        self.appearance_network = AppearanceNetwork(3+64, 3).cuda()
+        
+        std = 1e-4
+        self._appearance_embeddings = nn.Parameter(torch.empty(2048, 64).cuda())
+        self._appearance_embeddings.data.normal_(0, std)
+
+
     def eval(self):
         self.mlp_opacity.eval()
         self.mlp_cov.eval()
@@ -196,6 +207,10 @@ class GaussianModel:
     @property
     def get_appearance(self):
         return self.embedding_appearance
+
+
+    def get_apperance_embedding(self, idx):
+        return self._appearance_embeddings[idx]
 
     def set_depth_scale(self, num_cameras):
         if self.use_depth_scale:
@@ -364,6 +379,9 @@ class GaussianModel:
             {'params': self.mlp_opacity.parameters(), 'lr': training_args.mlp_opacity_lr_init, "name": "mlp_opacity"},
             {'params': self.mlp_cov.parameters(), 'lr': training_args.mlp_cov_lr_init, "name": "mlp_cov"},
             {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
+            {'params': [self._appearance_embeddings], 'lr': training_args.appearance_embeddings_lr, "name": "appearance_embeddings"},
+            {'params': self.appearance_network.parameters(), 'lr': training_args.appearance_network_lr, "name": "appearance_network"}
+
         ]
         
         
@@ -612,6 +630,9 @@ class GaussianModel:
     def replace_tensor_to_optimizer(self, tensor, name):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+
+            if group["name"] in ["appearance_embeddings", "appearance_network"]:
+                continue
             if group["name"] == name:
                 stored_state = self.optimizer.state.get(group['params'][0], None)
                 stored_state["exp_avg"] = torch.zeros_like(tensor)
@@ -628,6 +649,9 @@ class GaussianModel:
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+
+            if group["name"] in ["appearance_embeddings", "appearance_network"]:
+                continue
             if  'mlp' in group['name'] or \
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
@@ -684,6 +708,9 @@ class GaussianModel:
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+
+            if group["name"] in ["appearance_embeddings", "appearance_network"]:
+                continue
             if  'mlp' in group['name'] or \
                 'conv' in group['name'] or \
                 'feat_base' in group['name'] or \
@@ -691,6 +718,7 @@ class GaussianModel:
                 'depth_scale' in group['name'] or \
                 'cam_rot_delta' in group['name'] or \
                 'cam_trans_delta' in group['name']:
+
 
                 continue
 
