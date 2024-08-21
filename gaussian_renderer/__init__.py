@@ -391,7 +391,6 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
                 "scaling": scaling,
                 "opacity": opacity_image,
                 "depth": depth_image,
-                # "depth_var": depth_var_image,
                 "normal": normal_image,
                 }
 

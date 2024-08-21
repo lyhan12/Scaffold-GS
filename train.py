@@ -209,7 +209,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    use_mono_init = True
+    use_mono_init = False
 
     if use_mono_init:
         mask = torch.ones(gaussians.get_anchor.shape[0]).bool().cuda()
@@ -317,11 +317,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         scaling = render_pkg["scaling"]
         opacity = render_pkg["neural_opacity"]
         depth = render_pkg["depth"]
-        # depth_var = render_pkg["depth_var"]
         normal = render_pkg["normal"]
-        # edge = render_pkg["edge"]
         opacity_image = render_pkg["opacity"]
-
 
         gt_image = viewpoint_cam.image.cuda()
 
@@ -333,36 +330,26 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         ssim_loss = (1.0 - ssim(image, gt_image))
         loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
 
+        # loss += lpips_fn(image, gt_image).squeeze()
 
-        use_mono = True
+
+        use_mono = False
         if use_mono:
-
             depth_gt = viewpoint_cam.depth
             normal_gt = viewpoint_cam.normal
-
 
             depth_scale = gaussians.get_depth_scale[viewpoint_cam.uid]
             depth_gt = depth_scale * depth_gt
 
-
-
             normal = transforms.Resize(normal_gt.shape[1:])(normal)
-            # edge= transforms.Resize(normal_gt.shape[1:])(edge)
-
-            # mask_full = (opacity_image > 0.98).squeeze()
-
-
-
             # depth /= (opacity_image + 1e-6)
 
             depth = transforms.Resize(depth_gt.shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
-
             mask = (transforms.Resize(depth_gt.shape)(opacity_image) > 0.1).squeeze()
-            mask[...] = True
 
-            depth_loss_pearson = pearson_depth_loss(depth.squeeze(0)[mask], depth_gt[mask])
+            # depth_loss_pearson = pearson_depth_loss(depth.squeeze(0)[mask], depth_gt[mask])
             if gaussians.use_depth_scale:
-                depth_loss_l1 = l1_log_loss(depth, depth_gt)
+                depth_loss_l1 = l1_log_loss(depth[mask], depth_gt)
 
             # normal_loss = mean_angular_error(
             #     pred=normal,
@@ -391,8 +378,8 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if use_mono:
             if gaussians.use_depth_scale:
                 loss += 0.10 * depth_loss_l1
-            loss += 0.20 * depth_loss_pearson
-            loss += 0.20 * flattening_loss2
+            # loss += 0.20 * depth_loss_pearson
+            # loss += 0.20 * flattening_loss2
             loss += 0.20 * normal_mono_loss
             # loss += 0.20 * edge_mono_loss
             loss += 0.002 * aniso_loss
@@ -570,7 +557,6 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
                     gt_rgb = torch.clamp(viewpoint.image.to("cuda"), 0.0, 1.0)
 
                     # opacity = render_pkg["opacity"]
-                    # opacity_density = render_pkg["opacity_density"]
 
                     # depth = render_pkg["depth"]
                     # normal = render_pkg["normal"]
