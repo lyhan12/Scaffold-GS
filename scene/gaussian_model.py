@@ -33,6 +33,8 @@ from utils.sh_utils import RGB2SH
 
 from utils.pcd_utils import get_o3d_pcd_from_images
 
+from tqdm import tqdm
+
     
 class GaussianModel:
 
@@ -317,6 +319,68 @@ class GaussianModel:
 
         return
 
+
+    def create_from_cameras(self, cameras):
+
+
+        cam_num = len(cameras)
+        view_xyzs = torch.zeros((0,3)).float().cuda()
+        view_rgbs = torch.zeros((0,3)).float().cuda()
+        view_uids = torch.zeros((0,3)).float().cuda()
+
+        for _, cam in tqdm(enumerate(cameras)):
+
+            depth_scale = self.get_depth_scale[cam.uid].cpu()
+
+            depth = cam.depth.cpu()
+            normal = cam.normal.cpu()
+            color = transforms.Resize(depth.shape)(cam.image.cpu())
+
+            K_depth = cam.K(depth.shape).cpu()
+            T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
+
+
+            pcd = get_o3d_pcd_from_images(K_depth, depth, color, normal, depth_scale) 
+            pcd = pcd.voxel_down_sample(0.06)
+            pcd = pcd.uniform_down_sample(4)
+
+            xyz_cam = torch.tensor(np.array(pcd.points)).float().cuda()
+            rgb_cam = torch.tensor(np.array(pcd.colors)).float().cuda()
+            uid_cam = torch.ones(xyz_cam.shape[0]).cuda() * cam.uid
+
+
+            torch.cat([view_xyzs, xyz_cam], axis=0)
+            torch.cat([view_rgbs, rgb_cam], axis=0)
+            torch.cat([view_uids, uid_cam], axis=0)
+
+
+
+        import ipdb
+        ipdb.set_trace()
+
+
+        points = xyz_cam
+        fused_point_cloud = torch.tensor(np.asarray(points)).float().cuda()
+        offsets = torch.zeros((fused_point_cloud.shape[0], self.n_offsets, 3)).float().cuda()
+        anchors_feat = torch.zeros((fused_point_cloud.shape[0], self.feat_dim)).float().cuda()
+        
+        print("Number of points at initialisation : ", fused_point_cloud.shape[0])
+
+        dist2 = torch.clamp_min(distCUDA2(fused_point_cloud).float().cuda(), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 6)
+        
+        rots = torch.zeros((fused_point_cloud.shape[0], 4), device="cuda")
+        rots[:, 0] = 1
+
+        opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        self._anchor = nn.Parameter(fused_point_cloud.requires_grad_(True))
+        self._offset = nn.Parameter(offsets.requires_grad_(True))
+        self._anchor_feat = nn.Parameter(anchors_feat.requires_grad_(True))
+        self._scaling = nn.Parameter(scales.requires_grad_(True))
+        self._rotation = nn.Parameter(rots.requires_grad_(False))
+        self._opacity = nn.Parameter(opacities.requires_grad_(False))
+        self.max_radii2D = torch.zeros((self.get_anchor.shape[0]), device="cuda")
 
 
     def create_from_pcd(self, pcd : BasicPointCloud):

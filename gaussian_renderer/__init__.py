@@ -88,9 +88,6 @@ def visualize_from_viewpoint(pc : GaussianModel, cam : Camera, visible_mask=None
 
         # pcd_mask = get_o3d_pcd_from_images(K_depth, depth, color, normal, depth_scale, T_wc, mask_empty) 
 
-        import ipdb
-        ipdb.set_trace()
-
         pcd_raw_voxel = o3d.geometry.VoxelGrid.create_from_point_cloud(pcd_raw, voxel_size=0.05)
         gs_pcd_voxel = o3d.geometry.VoxelGrid.create_from_point_cloud(gs_pcd, voxel_size=0.05)
 

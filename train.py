@@ -209,7 +209,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    use_mono_init = False
+    use_mono_init = True
 
     if use_mono_init:
         mask = torch.ones(gaussians.get_anchor.shape[0]).bool().cuda()
@@ -219,35 +219,38 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
             init_cameras = scene.getTrainCameras().copy()
 
-            pcd_all = o3d.geometry.PointCloud()
-            for _, cam in tqdm(enumerate(init_cameras)):
 
-                depth_scale = gaussians.get_depth_scale[cam.uid].cpu()
+            gaussians.create_from_cameras(init_cameras)
 
-                depth = cam.depth.cpu()
-                normal = cam.normal.cpu()
-                color = transforms.Resize(depth.shape)(cam.image.cpu())
+            # pcd_all = o3d.geometry.PointCloud()
+            # for _, cam in tqdm(enumerate(init_cameras)):
 
-                K_depth = cam.K(depth.shape).cpu()
-                T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
+            #     depth_scale = gaussians.get_depth_scale[cam.uid].cpu()
 
-                pcd = get_o3d_pcd_from_images(K_depth, depth, color, normal, depth_scale, T_wc) 
-                pcd = pcd.voxel_down_sample(0.06)
-                pcd = pcd.uniform_down_sample(4)
+            #     depth = cam.depth.cpu()
+            #     normal = cam.normal.cpu()
+            #     color = transforms.Resize(depth.shape)(cam.image.cpu())
 
-                pcd_all += pcd
+            #     K_depth = cam.K(depth.shape).cpu()
+            #     T_wc = torch.inverse(cam.world_view_transform.transpose(0,1)).cpu()
 
-            
-            pcd_all = pcd_all.voxel_down_sample(0.06)
-            pcd_all = pcd_all.uniform_down_sample(4)
+            #     pcd = get_o3d_pcd_from_images(K_depth, depth, color, normal, depth_scale, T_wc) 
+            #     pcd = pcd.voxel_down_sample(0.06)
+            #     pcd = pcd.uniform_down_sample(4)
 
-            points = np.asarray(pcd_all.points)
-            colors = np.asarray(pcd_all.colors)
-            normals = np.zeros_like(points)
+            #     pcd_all += pcd
 
-            pcd = BasicPointCloud(points, colors, normals)
+            # 
+            # pcd_all = pcd_all.voxel_down_sample(0.06)
+            # pcd_all = pcd_all.uniform_down_sample(4)
 
-            gaussians.create_from_pcd(pcd)
+            # points = np.asarray(pcd_all.points)
+            # colors = np.asarray(pcd_all.colors)
+            # normals = np.zeros_like(points)
+
+            # pcd = BasicPointCloud(points, colors, normals)
+
+            # gaussians.create_from_pcd(pcd)
             gaussians.training_setup(opt)
 
 
@@ -256,6 +259,7 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
     viewpoint_stack = None
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):        
         # network gui not available in scaffold-gs yet
@@ -277,24 +281,12 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         iter_start.record()
 
         gaussians.update_learning_rate(iteration)
-
-
-        
+     
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
-            # viewpoint_stack = scene.getTrainCameras().copy()[:12:4]
 
-        # viewpoint_cam = viewpoint_stack.pop(0)
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
-
-        if gaussians.use_pose_update:
-            cam_rot_deltas, cam_trans_deltas = gaussians.get_pose_parameter
-            cam_rot_delta = cam_rot_deltas[viewpoint_cam.uid]
-            cam_trans_delta = cam_trans_deltas[viewpoint_cam.uid]
-
-            with torch.no_grad():
-                viewpoint_cam.set_delta_RT(cam_rot_delta, cam_trans_delta)
 
         # Render
         if (iteration - 1) == debug_from:
@@ -302,12 +294,9 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
 
         loss = 0.0
 
-        # for viewpoint_cam in viewpoint_cams:
-      
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe,background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad, render_normal=True, render_edge=False, render_density=False)
-
  
         image = render_pkg["render"]
         viewspace_point_tensor = render_pkg["viewspace_points"]
@@ -317,8 +306,11 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         scaling = render_pkg["scaling"]
         opacity = render_pkg["neural_opacity"]
         depth = render_pkg["depth"]
-        normal = render_pkg["normal"]
+        # normal = render_pkg["normal"]
         opacity_image = render_pkg["opacity"]
+
+
+        depth = depth / (opacity_image + 1e-6)
 
         gt_image = viewpoint_cam.image.cuda()
 
@@ -330,42 +322,22 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         ssim_loss = (1.0 - ssim(image, gt_image))
         loss += (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss
 
-        # loss += lpips_fn(image, gt_image).squeeze()
-
-
-        use_mono = False
+        use_mono = True
         if use_mono:
             depth_gt = viewpoint_cam.depth
             normal_gt = viewpoint_cam.normal
 
             depth_scale = gaussians.get_depth_scale[viewpoint_cam.uid]
-            depth_gt = depth_scale * depth_gt
+            depth_gt_re = depth_scale * depth_gt
 
-            normal = transforms.Resize(normal_gt.shape[1:])(normal)
-            # depth /= (opacity_image + 1e-6)
-
-            depth = transforms.Resize(depth_gt.shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
-            mask = (transforms.Resize(depth_gt.shape)(opacity_image) > 0.1).squeeze()
+            # normal = transforms.Resize(normal_gt.shape[1:])(normal)
+            depth_re = transforms.Resize(depth_gt.shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
 
             # depth_loss_pearson = pearson_depth_loss(depth.squeeze(0)[mask], depth_gt[mask])
             if gaussians.use_depth_scale:
-                depth_loss_l1 = l1_log_loss(depth[mask], depth_gt)
+                depth_loss_l1 = l1_log_loss(depth_re, depth_gt_re)
 
-            # normal_loss = mean_angular_error(
-            #     pred=normal,
-            #     gt=normal_gt,
-            # ).mean()
-
-
-            # K_depth = viewpoint_cam.K(depth.squeeze().shape)
-            # normal_surf = normal_from_depth_image(depth.unsqueeze(0), K_depth).squeeze(0)
-
-            normal_mono_loss = torch.abs(normal_gt[:,mask] - normal[:,mask]).mean()
-            # edge_mono_loss = torch.abs(normal_gt[:,mask] * edge[:,mask]).mean()
-            # normal_surf_loss = torch.abs(normal_surf[:,mask] - normal[:,mask]).mean()
-
-        flattening_loss = torch.min(scaling, dim=1, keepdim=True)[0].mean()
-        flattening_loss2 = (torch.min(scaling, dim=1, keepdim=True)[0] * torch.median(scaling, dim=1, keepdim=True)[0]).mean()
+            # normal_mono_loss = torch.abs(normal_gt - normal).mean()
 
         ratio_th = 4.0
         ratio = torch.max(scaling, dim=1, keepdim=True)[0] / torch.min(scaling, dim=1, keepdim=True)[0]
@@ -378,30 +350,19 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
         if use_mono:
             if gaussians.use_depth_scale:
                 loss += 0.10 * depth_loss_l1
-            # loss += 0.20 * depth_loss_pearson
-            # loss += 0.20 * flattening_loss2
-            loss += 0.20 * normal_mono_loss
-            # loss += 0.20 * edge_mono_loss
+            # loss += 0.20 * normal_mono_loss
             loss += 0.002 * aniso_loss
 
-        # if iteration > 1500:
-        #     loss += 0.10 * normal_surf_loss
-        # loss += 0.0 * pearson_loss_local 
-
-
         loss.backward()
-
-        # if iteration > 10:
-        #     with torch.no_grad():
-        #         pose_optimizer.step()
-
-        #         converged = update_pose(viewpoint_cam)
-
-
-        
+     
         iter_end.record()
 
         with torch.no_grad():
+
+            if iteration == 3000:
+                import ipdb
+                ipdb.set_trace()
+
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
 
@@ -451,7 +412,6 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     offset_scales = scales[:,:3].unsqueeze(dim=1).repeat([1,10,1])
                     offsets = offsets * offset_scales
 
-
                     norms = offsets.norm(dim=-1)
                     means = norms.mean(dim=-1)
                     mins = norms.min(dim=-1).values
@@ -467,8 +427,6 @@ def training(dataset, opt, pipe, dataset_name, testing_iterations, saving_iterat
                     cmean_max = means.max(dim=-1).values
                     cmean_mean = means.mean(dim=-1)
                     cmean_median = means.median(dim=-1).values
-
-
 
                     print("Global Min/Max/Mean/Median:", global_min, global_max, global_mean, global_median)
                     print("Cluster Mean Min/Max/Mean/Median:", cmean_min, cmean_max, cmean_mean, cmean_median)
@@ -536,9 +494,6 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
         validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
                               {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
 
-        # validation_configs = ({'name': 'test', 'cameras' : scene.getTrainCameras().copy()[:12:4]},
-        #                       {'name': 'train', 'cameras' : scene.getTrainCameras().copy()[:12:4]})
-
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
@@ -556,77 +511,63 @@ def training_report(tb_writer, dataset_name, iteration, Ll1, loss, l1_loss, elap
                     image = torch.clamp(render_pkg["render"], 0.0, 1.0)
                     gt_rgb = torch.clamp(viewpoint.image.to("cuda"), 0.0, 1.0)
 
-                    # opacity = render_pkg["opacity"]
+                    opacity = render_pkg["opacity"]
 
-                    # depth = render_pkg["depth"]
+                    depth = render_pkg["depth"]
+
+                    from utils.general_utils import colormap
+                    depth_map = colormap(depth.cpu().numpy()[0], cmap='turbo')
+
                     # normal = render_pkg["normal"]
-                    # edge = render_pkg["edge"]
-
-                    # from utils.general_utils import colormap
-                    # # depth_norm = depth.max()
-                    # # depth_map = depth / depth_norm
-                    # depth_map = colormap(depth.cpu().numpy()[0], cmap='turbo')
-
                     # normal_map = normal * 0.5 + 0.5
-                    # edge_map = edge * 0.5 + 0.5
-
-
                     # K_depth = viewpoint.K(depth.squeeze().shape)
                     # normal_surf = normal_from_depth_image(depth.unsqueeze(0), K_depth).squeeze(0)
-
                     # normal_surf_map = normal_surf * 0.5 + 0.5
-
-
                     # gt_normal_map = torch.clamp((1. + viewpoint.normal.to("cuda")) / 2., 0.0, 1.0)
-
-                    # gt_depth = viewpoint.depth[None].to("cuda")
-                    # gt_norm = gt_depth.max()
-                    # gt_depth_map = gt_depth / gt_norm
-                    # gt_depth_map = colormap(gt_depth.cpu().numpy()[0], cmap='turbo')
-
 
                     # normal_gt_surf = surface_normal_from_depth(gt_depth.unsqueeze(0), K_depth).squeeze(0)
                     # normal_gt_surf_map = normal_gt_surf * 0.5 + 0.5
 
-
-                    # # opacity_mask = (opacity > 0.8).squeeze(0)
-                    # # gt_depth_scaled = pearson_depth_transform(depth.squeeze(0), gt_depth.squeeze(0), opacity_mask).unsqueeze(0)
-                    # # # gt_depth_scaled_map = gt_depth_scaled / depth_norm
-
-                    # if scene.gaussians.use_depth_scale:
-                    #     depth_scale = scene.gaussians.get_depth_scale[viewpoint.uid]
-                    #     gt_depth_scaled = depth_scale * gt_depth
-                    #     gt_depth_scaled_map = colormap(gt_depth_scaled.cpu().numpy()[0], cmap="turbo")
-
-                    #     depth_resized = transforms.Resize(gt_depth.squeeze().shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
-                    #     depth_diff = torch.clamp_max(torch.abs(depth_resized - gt_depth_scaled), 3.0)
-                    #     depth_diff_map = colormap(depth_diff.cpu().numpy()[0], cmap="turbo")
+                    gt_depth = viewpoint.depth[None].to("cuda")
+                    gt_norm = gt_depth.max()
+                    gt_depth_map = gt_depth / gt_norm
+                    gt_depth_map = colormap(gt_depth.cpu().numpy()[0], cmap='turbo')
 
 
-                    # if tb_writer and (idx < 30):
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/rgb".format(viewpoint.image_name), image[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/errormap".format(viewpoint.image_name), (gt_rgb[None]-image[None]).abs(), global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth_map[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal".format(viewpoint.image_name), normal_map[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/edge".format(viewpoint.image_name), edge_map[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_surf".format(viewpoint.image_name), normal_surf_map[None], global_step=iteration)
-                    #     if scene.gaussians.use_depth_scale:
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth_scaled".format(viewpoint.image_name), gt_depth_scaled_map[None], global_step=iteration)
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth_diff_map".format(viewpoint.image_name), depth_diff_map[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/opacity".format(viewpoint.image_name), opacity[None], global_step=iteration)
-                    #     tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/opacity_density".format(viewpoint.image_name), opacity_density[None], global_step=iteration)
 
-                    #     if wandb:
-                    #         render_image_list.append(image[None])
-                    #         errormap_list.append((gt_rgb[None]-image[None]).abs())
-                    #         
-                    #     if iteration == testing_iterations[0]:
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_rgb".format(viewpoint.image_name), gt_rgb[None], global_step=iteration)
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth".format(viewpoint.image_name), gt_depth_map[None], global_step=iteration)
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_normal".format(viewpoint.image_name), gt_normal_map[None], global_step=iteration)
-                    #         tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_gt_surf".format(viewpoint.image_name), normal_gt_surf_map[None], global_step=iteration)
-                    #         if wandb:
-                    #             gt_image_list.append(gt_rgb[None])
+
+                    if scene.gaussians.use_depth_scale:
+                        depth_scale = scene.gaussians.get_depth_scale[viewpoint.uid]
+                        gt_depth_scaled = depth_scale * gt_depth
+                        gt_depth_scaled_map = colormap(gt_depth_scaled.cpu().numpy()[0], cmap="turbo")
+
+                        depth_resized = transforms.Resize(gt_depth.squeeze().shape, interpolation=torchvision.transforms.InterpolationMode.NEAREST)(depth)
+                        depth_diff = torch.clamp_max(torch.abs(depth_resized - gt_depth_scaled), 3.0)
+                        depth_diff_map = colormap(depth_diff.cpu().numpy()[0], cmap="turbo")
+
+
+                    if tb_writer and (idx < 30):
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/rgb".format(viewpoint.image_name), image[None], global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/errormap".format(viewpoint.image_name), (gt_rgb[None]-image[None]).abs(), global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth_map[None], global_step=iteration)
+                        # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal".format(viewpoint.image_name), normal_map[None], global_step=iteration)
+                        # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_surf".format(viewpoint.image_name), normal_surf_map[None], global_step=iteration)
+                        if scene.gaussians.use_depth_scale:
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth_scaled".format(viewpoint.image_name), gt_depth_scaled_map[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/depth_diff_map".format(viewpoint.image_name), depth_diff_map[None], global_step=iteration)
+                        tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/opacity".format(viewpoint.image_name), opacity[None], global_step=iteration)
+
+                        if wandb:
+                            render_image_list.append(image[None])
+                            errormap_list.append((gt_rgb[None]-image[None]).abs())
+                            
+                        if iteration == testing_iterations[0]:
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_rgb".format(viewpoint.image_name), gt_rgb[None], global_step=iteration)
+                            tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_depth".format(viewpoint.image_name), gt_depth_map[None], global_step=iteration)
+                            # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/gt_normal".format(viewpoint.image_name), gt_normal_map[None], global_step=iteration)
+                            # tb_writer.add_images(f'{dataset_name}/'+config['name'] + "_view_{}/normal_gt_surf".format(viewpoint.image_name), normal_gt_surf_map[None], global_step=iteration)
+                            if wandb:
+                                gt_image_list.append(gt_rgb[None])
 
                     l1_test += l1_loss(image, gt_rgb).mean().double()
                     psnr_test += psnr(image, gt_rgb).mean().double()
@@ -844,7 +785,7 @@ if __name__ == "__main__":
     # parser.add_argument("--test_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     # parser.add_argument("--save_iterations", nargs="+", type=int, default=[3_000, 7_000, 30_000])
     # default_iterations = [100] + [200] + [300] + [400] + [500] + [1000] + [1500] + [2000] + [3000] + list(range(10000, 60000, 10000))
-    test_iterations = [500] + [1000] + [1500] + [2000] + [2500] + [3000] + list(range(4000, 30000, 1000))
+    test_iterations = [100, 500] + [1000] + [1500] + [2000] + [2500] + [3000] + list(range(4000, 30000, 1000))
     # test_iterations = [500] + [5000] + [10000] + [15000] + [20000] + [25000] + [30000]
     save_iterations = test_iterations # [1000, 7000, 15000, 30000]
 
